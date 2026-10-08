@@ -1,0 +1,5 @@
+sources = ["docs", "examples"]
+output = ".luvyn/project.lu"
+export = ".luvyn/context.zip"
+autosave = false
+

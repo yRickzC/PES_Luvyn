@@ -1,0 +1,14 @@
+namespace example.users
+
+entity User
+
+purpose:
+    usuário autenticável da aplicação
+
+fields:
+    id: ID
+    name: String
+    email: String
+
+rules:
+    - email único e válido

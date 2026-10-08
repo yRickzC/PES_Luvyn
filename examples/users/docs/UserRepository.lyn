@@ -1,0 +1,14 @@
+namespace example.users
+
+interface UserRepository
+
+purpose:
+    contrato de persistência dos usuários
+
+exposes:
+    persist(user: User) -> User
+    findById(id: ID) -> User?
+
+contracts:
+    - findById retorna null quando o usuário não existe
+    - persist preserva unicidade do email

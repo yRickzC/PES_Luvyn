@@ -1,0 +1,58 @@
+namespace luvyn
+
+component IDE
+
+purpose:
+    editar documentação real com Monaco, diagnostics e navegação semântica
+
+depends:
+    Compiler
+    GraphEngine
+    EditorServices
+
+rules:
+    - operações pesadas executam fora da thread do servidor assíncrono
+    - buffers modificados sobrevivem a mudanças externas
+    - salvar exige hash do arquivo em disco correspondente à versão aberta
+    - acesso ao filesystem fica limitado ao workspace
+
+behavior:
+    debounce de 450ms atualiza documento e modelo; watcher detecta alterações externas
+
+source:
+    ui/src/main.tsx
+    crates/luvyn/src/server.rs
+
+component EditorServices
+
+purpose:
+    compartilhar autocomplete, imports, hover, referências e rename validado
+
+depends:
+    Resolver
+    GraphEngine
+
+rules:
+    - rename simula projeto resultante antes de aceitar edição
+    - prose e source mappings não são renomeados automaticamente
+    - posições do editor usam UTF-16
+
+source:
+    crates/luvyn-core/src/editor.rs
+
+component Exporter
+
+purpose:
+    gerar ZIP determinístico com índice e Markdown por namespace
+
+depends:
+    GraphEngine
+
+rules:
+    - preservar texto livre, contratos e regras
+    - compactar assinaturas e estrutura sem adivinhar significado da prosa
+    - remover duplicação de relações e headings deriváveis
+    - ordenar documentos e fixar timestamps do ZIP
+
+source:
+    crates/luvyn-core/src/export.rs

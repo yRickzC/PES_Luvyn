@@ -1,1 +1,8 @@
 graphify-out/
+target/
+ui/node_modules/
+ui/dist/
+*.lu
+.luvyn/
+*.tmp
+

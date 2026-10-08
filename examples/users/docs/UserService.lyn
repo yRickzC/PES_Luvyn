@@ -1,0 +1,29 @@
+namespace example.users
+
+service UserService
+implements UserRepository
+
+purpose:
+    gerenciar usuários da aplicação
+
+rules:
+    - toda busca deve usar o repository
+    - usuário inexistente retorna null
+    - não pode criar usuário sem email válido
+    - operações de escrita devem registrar auditoria
+
+behavior:
+    ao criar um usuário, validar email antes de persistir
+
+flow:
+    createUser: validate_email -> repository.persist -> audit
+
+depends:
+    UserRepository
+
+exposes:
+    createUser(name: String, email: String) -> User?
+    getUser(id: ID) -> User?
+
+source:
+    src/services/UserService.java
