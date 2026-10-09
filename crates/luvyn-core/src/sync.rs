@@ -164,8 +164,8 @@ pub struct SyncReport {
     pub directories_deleted: usize,
     pub conflicts: Vec<String>,
 }
-/// Open a disposable Cloud checkout from Drive, never uploading stale cache data.
-/// Only the project-id-derived directory beneath the supplied cache root is replaced.
+/// Reopen an existing Cloud checkout with three-way synchronization.
+/// Only a first checkout is staged; unsynchronized local data is never discarded.
 pub fn open_cloud_cache(
     provider: &mut dyn SyncProvider,
     project: &str,
@@ -192,6 +192,9 @@ pub fn open_cloud_cache(
         {
             return Err(Error::Message("Unsafe Cloud cache directory".into()));
         }
+    }
+    if cache.exists() {
+        return synchronize(provider, project, &cache);
     }
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
@@ -235,7 +238,7 @@ pub fn open_cloud_cache(
     match download {
         Ok(report) => {
             if cache.exists() {
-                fs::remove_dir_all(&cache)?;
+                return Err(Error::Message("Cloud cache appeared during download; reopen to synchronize without replacing it".into()));
             }
             fs::rename(&staging, &cache)?;
             Ok(report)

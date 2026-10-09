@@ -112,6 +112,7 @@ function App({
     autosaveRef = useRef(autosave);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>()),
     openPending = useRef(new Map<string, Promise<monaco.editor.ITextModel>>()),
+    savePending = useRef(new Map<string, Promise<void>>()),
     refreshing = useRef(false),
     mounted = useRef(true);
   const notify = useCallback((text: string) => {
@@ -242,30 +243,61 @@ function App({
   }, []);
   const save = useCallback(
     async (file = activeRef.current) => {
-      const tab = tabsRef.current.find((t) => t.file === file);
-      if (!tab || !tab.dirty) return;
-      if (tab.conflict) {
-        notify(
-          "Arquivo alterado externamente. Revise conflito ou recarregue antes de salvar.",
-        );
-        return;
-      }
-      const text = tab.model.getValue(),
-        version = tab.model.getAlternativeVersionId();
+      // Serialize Ctrl+S/autosave while a previous Cloud upload is still running.
+      const previous = savePending.current.get(file) || Promise.resolve();
+      const pending = previous
+        .catch(() => {})
+        .then(async () => {
+          const tab = tabsRef.current.find((t) => t.file === file);
+          if (!tab) return;
+          if (!tab.dirty) {
+            if (currentIsCloud) {
+              try {
+                await onSync();
+                notify("Salvo no Google Drive");
+              } catch (error) {
+                notify(
+                  `Conteúdo local preservado; envio ao Drive pendente: ${String(error)}`,
+                );
+              }
+            }
+            return;
+          }
+          if (tab.conflict) {
+            notify(
+              "Arquivo alterado externamente. Revise conflito ou recarregue antes de salvar.",
+            );
+            return;
+          }
+          const text = tab.model.getValue(),
+            version = tab.model.getAlternativeVersionId();
+          try {
+            const data = await api("save", { file, text, hash: tab.hash });
+            tab.hash = data.hash;
+            tab.version = version;
+            tab.dirty = tab.model.getAlternativeVersionId() !== version;
+            tab.conflict = false;
+            if (data.cloud_error)
+              notify(
+                `Salvo localmente; envio ao Drive pendente: ${data.cloud_error}`,
+              );
+            else if (data.cloud_synced) notify("Salvo no Google Drive");
+            touch();
+            if (tab.dirty) await sync(tab.model);
+            void refresh();
+          } catch (e) {
+            notify(e instanceof Error ? e.message : String(e));
+          }
+        });
+      savePending.current.set(file, pending);
       try {
-        const data = await api("save", { file, text, hash: tab.hash });
-        tab.hash = data.hash;
-        tab.version = version;
-        tab.dirty = tab.model.getAlternativeVersionId() !== version;
-        tab.conflict = false;
-        touch();
-        if (tab.dirty) await sync(tab.model);
-        void refresh();
-      } catch (e) {
-        notify(e instanceof Error ? e.message : String(e));
+        await pending;
+      } finally {
+        if (savePending.current.get(file) === pending)
+          savePending.current.delete(file);
       }
     },
-    [notify, refresh, sync, touch],
+    [notify, refresh, sync, touch, currentIsCloud, onSync],
   );
   const open = useCallback(
     async (

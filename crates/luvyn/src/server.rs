@@ -266,7 +266,31 @@ fn handle(state: &App, mut request: Value) -> Result<Value> {
     {
         return Err(Error::Message("Open a project first".into()));
     }
-    crate::ide::session::handle(&state.core, request)
+    let saved = op == "save";
+    let mut result = crate::ide::session::handle(&state.core, request)?;
+    if saved {
+        let mut projects = state
+            .projects
+            .lock()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        match projects.synchronize_after_save(&state.core) {
+            Ok(Some(sync)) => {
+                let conflicts = sync["report"]["conflicts"].as_array();
+                if conflicts.is_some_and(|values| !values.is_empty()) {
+                    result["cloud_error"] = json!(format!(
+                        "Conflitos no Drive: {}. Conteúdo local preservado.",
+                        sync["report"]["conflicts"]
+                    ));
+                } else {
+                    result["cloud_synced"] = json!(true);
+                    result["cloud_report"] = sync["report"].clone();
+                }
+            }
+            Err(error) => result["cloud_error"] = json!(error.to_string()),
+            Ok(None) => {}
+        }
+    }
+    Ok(result)
 }
 #[cfg(test)]
 mod tests {

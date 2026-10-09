@@ -113,6 +113,15 @@ impl Projects {
             json!({"current":self.current,"recent":self.registry.list()?,"cloud":{"connected":vault().and_then(|v|v.get_password().map_err(message)).is_ok(),"configured":config().is_ok(),"authorization":*self.oauth.lock().map_err(message)?}}),
         )
     }
+    pub fn synchronize_after_save(
+        &mut self,
+        core: &luvyn_core::ide::IdeCore,
+    ) -> Result<Option<Value>> {
+        if self.cloud.is_none() {
+            return Ok(None);
+        }
+        self.action(core, &json!({"op":"project-sync"})).map(Some)
+    }
     pub fn action(&mut self, core: &luvyn_core::ide::IdeCore, request: &Value) -> Result<Value> {
         let op = request["op"].as_str().unwrap_or("");
         let text = |key: &str| {
@@ -224,9 +233,10 @@ impl Projects {
                     .current
                     .as_ref()
                     .ok_or_else(|| message("No project open"))?;
-                let mut provider = luvyn_drive::GoogleDriveProvider::new(token()?);
-                let report =
-                    core.with_saved_workspace(|| synchronize(&mut provider, cloud, root))?;
+                let report = core.with_saved_workspace(|| {
+                    let mut provider = luvyn_drive::GoogleDriveProvider::new(token()?);
+                    synchronize(&mut provider, cloud, root)
+                })?;
                 core.external
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 core.revision
@@ -363,6 +373,36 @@ impl Projects {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_save_preserves_local_data_when_other_buffers_block_sync() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("main.lyn"), "class Main\n").unwrap();
+        std::fs::write(root.path().join("other.lyn"), "class Other\n").unwrap();
+        let core = luvyn_core::ide::IdeCore::new(luvyn_core::Project::open(root.path()).unwrap());
+        let mut projects =
+            Projects::with_storage(root.path(), root.path().join("registry")).unwrap();
+        projects.cloud = Some("test-cloud".into());
+        luvyn_core::ide::handle(
+            &core,
+            json!({"op":"edit","file":"other.lyn","text":"class Other\npurpose: unsaved\n"}),
+        )
+        .unwrap();
+        let old = luvyn_core::ide::handle(&core, json!({"op":"file","file":"main.lyn"})).unwrap();
+        let saved = "class Main\npurpose: preserved\n";
+        luvyn_core::ide::handle(
+            &core,
+            json!({"op":"save","file":"main.lyn","text":saved,"hash":old["hash"]}),
+        )
+        .unwrap();
+        let error = projects.synchronize_after_save(&core).unwrap_err();
+        assert!(error.to_string().contains("Save documents"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("main.lyn")).unwrap(),
+            saved
+        );
+        assert!(!core.overlays_empty());
+    }
 
     #[test]
     fn browser_oauth_returns_url_and_accepts_cancel_without_launching_external_browser() {

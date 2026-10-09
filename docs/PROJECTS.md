@@ -42,7 +42,7 @@ Novo Cloud cria `Luvyn/<nome>/`. Cada pasta de projeto recebe as propriedades p�
 
 ## Sincronização
 
-Abrir Cloud sincroniza o cache privado da aplicação. O botão **Sync** sincroniza alterações locais/remotas enquanto o projeto está aberto. A operação exige buffers salvos e aguarda Build. Não existe publicação automática a cada caractere.
+Abrir Cloud sincroniza o cache privado da aplicação sem descartar alterações ainda não enviadas. No Desktop/Server, **Salvar** grava o arquivo local e tenta sincronizar com o Drive; a IDE informa se o upload terminou ou ficou pendente por falha/conflito. Ctrl+S também permite tentar novamente um upload pendente. O botão **Sync** sincroniza alterações locais/remotas enquanto o projeto está aberto. A operação exige buffers salvos e aguarda Build. Não existe publicação automática a cada caractere.
 
 São sincronizados `.lyn`, `luvyn.toml`, `.ignore.luvyn` e arquivos de ignore relacionados. `.lu`, `.luvyn`, caches, Git, `target`, `dist` e `node_modules` nunca são enviados. Build Cloud escreve artifacts locais; caminhos Target específicos de outro computador não controlam esse build. No Android um Target SAF selecionado pode receber o artifact, sem enviá-lo ao Drive.
 

@@ -212,7 +212,7 @@ fn cloud_cache_failed_download_keeps_existing_checkout_and_other_projects() {
 }
 
 #[test]
-fn cloud_open_recreates_conflicting_and_corrupt_cache_without_changing_drive() {
+fn cloud_open_preserves_unsent_edits_uploads_them_and_keeps_conflicts() {
     let storage = tempfile::tempdir().unwrap();
     let cache = storage
         .path()
@@ -221,54 +221,64 @@ fn cloud_open_recreates_conflicting_and_corrupt_cache_without_changing_drive() {
     drive
         .upload("project", "main.lyn", b"main:\n    purpose: remote\n", None)
         .unwrap();
-    drive
-        .upload(
-            "project",
-            "docs/player/Player.lyn",
-            b"entity Player\n",
-            None,
-        )
-        .unwrap();
-    drive.create_directory("project", "docs/empty").unwrap();
-    drive.create_directory("project", "docs").unwrap();
-    drive.create_directory("project", "docs/player").unwrap();
     sync::open_cloud_cache(&mut drive, "project", storage.path()).unwrap();
-    for manifest in ["valid", "corrupt", "future"] {
-        std::fs::write(cache.join("main.lyn"), b"stale conflict").unwrap();
-        std::fs::write(cache.join("obsolete.lyn"), b"stale only").unwrap();
-        std::fs::write(cache.join("luvyn.toml"), b"invalid = [").unwrap();
-        if manifest != "valid" {
-            std::fs::write(
-                cache.join(".luvyn/sync.json"),
-                if manifest == "corrupt" {
-                    "broken"
-                } else {
-                    "{\"schema_version\":999}"
-                },
-            )
-            .unwrap();
-        }
-        let report = sync::open_cloud_cache(&mut drive, "project", storage.path()).unwrap();
-        assert!(report.conflicts.is_empty());
-        assert_eq!(report.downloaded, 2);
-        assert_eq!(report.uploaded, 0);
-        assert_eq!(
-            std::fs::read(cache.join("main.lyn")).unwrap(),
-            drive.files["main.lyn"].1
-        );
-        assert!(!cache.join("obsolete.lyn").exists());
-        assert!(!cache.join("luvyn.toml").exists());
-        assert!(cache.join("docs/player/Player.lyn").is_file());
-        assert!(cache.join("docs/empty").is_dir());
-        assert_eq!(drive.files.len(), 2);
-        assert_eq!(drive.directories.len(), 3);
-        assert_eq!(
-            sync::synchronize(&mut drive, "project", &cache)
-                .unwrap()
-                .unchanged,
-            2
-        );
-    }
+    let saved = b"main:\n    purpose: saved locally\n";
+    let ide = IdeCore::new(Project::open(&cache).unwrap());
+    let file = ide::handle(&ide, json!({"op":"file","file":"main.lyn"})).unwrap();
+    ide::handle(
+        &ide,
+        json!({"op":"edit","file":"main.lyn","text":std::str::from_utf8(saved).unwrap()}),
+    )
+    .unwrap();
+    ide::handle(&ide, json!({"op":"save","file":"main.lyn","text":std::str::from_utf8(saved).unwrap(),"hash":file["hash"]})).unwrap();
+    let saved_report = ide
+        .with_saved_workspace(|| sync::synchronize(&mut drive, "project", &cache))
+        .unwrap();
+    assert_eq!(saved_report.uploaded, 1);
+    assert_eq!(drive.files["main.lyn"].1, saved);
+    std::fs::create_dir_all(cache.join("src")).unwrap();
+    std::fs::write(cache.join("src/Weapon.lyn"), b"class Weapon\n").unwrap();
+    let report = sync::open_cloud_cache(&mut drive, "project", storage.path()).unwrap();
+    assert!(report.conflicts.is_empty());
+    assert_eq!(report.uploaded, 1);
+    assert_eq!(drive.files["main.lyn"].1, saved);
+    assert_eq!(drive.files["src/Weapon.lyn"].1, b"class Weapon\n");
+    let fresh = tempfile::tempdir().unwrap();
+    sync::open_cloud_cache(&mut drive, "project", fresh.path()).unwrap();
+    assert_eq!(
+        std::fs::read(
+            fresh
+                .path()
+                .join(blake3::hash(b"project").to_hex().as_str())
+                .join("main.lyn")
+        )
+        .unwrap(),
+        saved
+    );
+    std::fs::write(cache.join("main.lyn"), b"local pending").unwrap();
+    drive.files.get_mut("main.lyn").unwrap().0.version = "2".into();
+    drive.files.get_mut("main.lyn").unwrap().1 = b"remote changed".to_vec();
+    let report = sync::open_cloud_cache(&mut drive, "project", storage.path()).unwrap();
+    assert_eq!(report.conflicts, vec!["main.lyn"]);
+    assert_eq!(
+        std::fs::read(cache.join("main.lyn")).unwrap(),
+        b"local pending"
+    );
+    assert_eq!(drive.files["main.lyn"].1, b"remote changed");
+    std::fs::write(cache.join(".luvyn/sync.json"), b"broken").unwrap();
+    let report = sync::open_cloud_cache(&mut drive, "project", storage.path()).unwrap();
+    assert!(report.conflicts.contains(&"main.lyn".to_owned()));
+    assert_eq!(
+        std::fs::read(cache.join("main.lyn")).unwrap(),
+        b"local pending"
+    );
+    assert_eq!(drive.files["main.lyn"].1, b"remote changed");
+    std::fs::write(cache.join("luvyn.toml"), b"invalid = [").unwrap();
+    assert!(sync::open_cloud_cache(&mut drive, "project", storage.path()).is_err());
+    assert_eq!(
+        std::fs::read(cache.join("main.lyn")).unwrap(),
+        b"local pending"
+    );
 }
 
 #[test]
