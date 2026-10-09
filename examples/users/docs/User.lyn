@@ -1,14 +1,13 @@
-namespace example.users
-
-entity User
+@entity
+class User
 
 purpose:
     usuário autenticável da aplicação
 
 fields:
-    id: ID
+    id: i64
     name: String
     email: String
 
 rules:
-    - email único e válido
+    - email único e válido self.id

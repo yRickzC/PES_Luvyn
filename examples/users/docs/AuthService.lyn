@@ -1,8 +1,5 @@
-namespace example.auth
-import example.users.UserService
-import example.users.User
-
-service AuthService
+@service
+class AuthService
 
 purpose:
     coordenar autenticação sem duplicar regras de usuário
@@ -10,11 +7,9 @@ purpose:
 depends:
     UserService
 
-uses:
-    User
-
 rules:
     - credenciais nunca aparecem em diagnostics ou documentação exportada
 
-exposes:
-    authenticate(email: String) -> User?
+export:
+    func authenticate(email: String) -> Option<User>
+    func connect(email: String) -> User

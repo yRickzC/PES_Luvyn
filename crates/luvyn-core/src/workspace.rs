@@ -12,6 +12,7 @@ pub const MAX_SOURCE: usize = 2 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProjectConfig {
+    pub project: ProjectSettings,
     pub sources: Vec<String>,
     pub ignore: Vec<String>,
     pub output: String,
@@ -21,11 +22,27 @@ pub struct ProjectConfig {
 impl Default for ProjectConfig {
     fn default() -> Self {
         Self {
+            project: ProjectSettings::default(),
             sources: vec![".".into()],
             ignore: vec![],
             output: ".luvyn/project.lu".into(),
             export: ".luvyn/context.zip".into(),
             autosave: false,
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectSettings {
+    pub target: Option<String>,
+    /// Artifact Git policy in the repository where `luvyn git` runs.
+    pub artifacts: String,
+}
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            target: None,
+            artifacts: "ignore".into(),
         }
     }
 }
@@ -48,15 +65,24 @@ pub struct BuildStats {
     pub edges: usize,
 }
 pub struct Project {
+    /// Compatibility name for documentation_root; source/editor paths always use this root.
     pub root: PathBuf,
+    pub target_project_root: PathBuf,
+    pub artifact_root: PathBuf,
     pub config: ProjectConfig,
     cache: Cache,
     pub graph: Graph,
     pub stats: BuildStats,
+    target_override: Option<PathBuf>,
 }
 
 impl Project {
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_with_target(root, None)
+    }
+    /// Portable hosts stage provider documents locally and supply a platform-managed target.
+    /// This does not alter the persisted configuration or add platform dependencies to Core.
+    pub fn open_with_target(root: &Path, target_override: Option<&Path>) -> Result<Self> {
         let root = root
             .canonicalize()
             .map_err(|e| Error::Message(format!("Workspace {}: {e}", root.display())))?;
@@ -76,22 +102,87 @@ impl Project {
             .filter(|m| m.len() < 64 * 1024 * 1024)
             .and_then(|_| fs::read(cache_path).ok())
             .and_then(|b| postcard::from_bytes::<Cache>(&b).ok())
-            .filter(|c| c.version == 1)
+            .filter(|c| c.version == 4)
             .unwrap_or_default();
+        let target_project_root = if let Some(target) = target_override {
+            target.canonicalize()?
+        } else {
+            target_root(&root, &config)?
+        };
+        let artifact_root = safe_path(&target_project_root, ".luvyn")?;
         let project = Self {
             root,
+            target_project_root,
+            artifact_root,
             config,
             cache,
             graph: Graph::default(),
             stats: BuildStats::default(),
+            target_override: target_override.map(Path::to_owned),
         };
         // Reject unsafe configured destinations before any write.
-        project.safe_path(&project.config.output)?;
+        project.output_path()?;
         project.safe_path(&project.config.export)?;
         Ok(project)
     }
     pub fn safe_path(&self, relative: &str) -> Result<PathBuf> {
         safe_path(&self.root, relative)
+    }
+    pub fn documentation_root(&self) -> &Path {
+        &self.root
+    }
+    pub fn output_path(&self) -> Result<PathBuf> {
+        safe_path(&self.target_project_root, &self.config.output)
+    }
+    pub fn parse_document(&self, path: &str, source: &str) -> ParsedFile {
+        let relative = self
+            .config
+            .sources
+            .iter()
+            .filter_map(|root| {
+                let root = root.trim_end_matches('/').trim_end_matches('\\');
+                if root == "." {
+                    Some(path)
+                } else {
+                    path.strip_prefix(root).and_then(|p| p.strip_prefix('/'))
+                }
+            })
+            .min_by_key(|p| p.len())
+            .unwrap_or(path);
+        parser::parse_in_module(path, source, &parser::module_name(relative))
+    }
+    pub fn walk(&self, start: impl AsRef<Path>) -> Result<ignore::WalkBuilder> {
+        let mut builder = ignore::WalkBuilder::new(start);
+        builder
+            .hidden(false)
+            .follow_links(false)
+            .require_git(false)
+            .add_custom_ignore_filename(".ignore.luvyn")
+            .add_custom_ignore_filename(".luvynignore");
+        let root = self.root.clone();
+        let patterns = self.config.ignore.clone();
+        let mut glob = ignore::gitignore::GitignoreBuilder::new(&root);
+        let ignore_file = root.join(".ignore.luvyn");
+        if ignore_file.exists()
+            && let Some(error) = glob.add(ignore_file)
+        {
+            return Err(Error::Message(error.to_string()));
+        }
+        for p in &patterns {
+            glob.add_line(None, p)
+                .map_err(|e| Error::Message(format!("ignore pattern: {e}")))?;
+        }
+        let glob = glob.build().map_err(|e| Error::Message(e.to_string()))?;
+        builder.filter_entry(move |e| {
+            let name = e.file_name().to_string_lossy();
+            !matches!(
+                name.as_ref(),
+                ".git" | ".luvyn" | "target" | "node_modules" | "graphify-out" | "dist"
+            ) && !glob
+                .matched_path_or_any_parents(e.path(), e.file_type().is_some_and(|f| f.is_dir()))
+                .is_ignore()
+        });
+        Ok(builder)
     }
     pub fn discover(&self) -> Result<Vec<String>> {
         let mut found = Vec::new();
@@ -100,32 +191,7 @@ impl Project {
             if !start.exists() {
                 return Err(Error::Message(format!("Source root not found: {source}")));
             }
-            let mut builder = ignore::WalkBuilder::new(start);
-            builder
-                .hidden(false)
-                .follow_links(false)
-                .require_git(false)
-                .add_custom_ignore_filename(".luvynignore");
-            let root = self.root.clone();
-            let patterns = self.config.ignore.clone();
-            let mut glob = ignore::gitignore::GitignoreBuilder::new(&root);
-            for p in &patterns {
-                glob.add_line(None, p)
-                    .map_err(|e| Error::Message(format!("ignore pattern: {e}")))?;
-            }
-            let glob = glob.build().map_err(|e| Error::Message(e.to_string()))?;
-            builder.filter_entry(move |e| {
-                let name = e.file_name().to_string_lossy();
-                !matches!(
-                    name.as_ref(),
-                    ".git" | ".luvyn" | "target" | "node_modules" | "graphify-out" | "dist"
-                ) && !glob
-                    .matched_path_or_any_parents(
-                        e.path(),
-                        e.file_type().is_some_and(|f| f.is_dir()),
-                    )
-                    .is_ignore()
-            });
+            let builder = self.walk(start)?;
             for entry in builder.build() {
                 let entry = entry.map_err(|e| Error::Message(e.to_string()))?;
                 if entry.file_type().is_some_and(|f| f.is_file())
@@ -150,6 +216,55 @@ impl Project {
         found.dedup();
         Ok(found)
     }
+    pub fn is_source(&self, path: &str) -> bool {
+        let path = path.replace('\\', "/");
+        self.config.sources.iter().any(|root| {
+            let root = root.replace('\\', "/");
+            let root = root.trim_end_matches('/');
+            root == "." || path == root || path.starts_with(&format!("{root}/"))
+        })
+    }
+    /// Same mature gitignore matcher for overlay eligibility and IDE writes.
+    pub fn is_ignored(&self, relative: &str, is_dir: bool) -> Result<bool> {
+        let path = self.safe_path(relative)?;
+        if Path::new(relative).components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some(".git" | ".luvyn" | "target" | "node_modules" | "dist" | "graphify-out")
+            )
+        }) {
+            return Ok(true);
+        }
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&self.root);
+        for pattern in &self.config.ignore {
+            builder
+                .add_line(None, pattern)
+                .map_err(|e| Error::Message(e.to_string()))?;
+        }
+        let mut directories = Vec::new();
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if !dir.starts_with(&self.root) {
+                break;
+            }
+            directories.push(dir.to_path_buf());
+            parent = dir.parent();
+        }
+        for dir in directories.into_iter().rev() {
+            for name in [".gitignore", ".luvynignore", ".ignore.luvyn"] {
+                let file = dir.join(name);
+                if file.exists()
+                    && let Some(error) = builder.add(file)
+                {
+                    return Err(Error::Message(error.to_string()));
+                }
+            }
+        }
+        let matcher = builder.build().map_err(|e| Error::Message(e.to_string()))?;
+        Ok(matcher
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore())
+    }
     /// Only changed documents are parsed. Resolution uses cached semantic documents.
     pub fn analyze(&mut self, overlays: &BTreeMap<String, String>) -> Result<&Graph> {
         let config_path = self.safe_path("luvyn.toml")?;
@@ -159,9 +274,16 @@ impl Project {
         } else {
             ProjectConfig::default()
         };
-        self.safe_path(&config.output)?;
+        let target = if let Some(target) = &self.target_override {
+            target.canonicalize()?
+        } else {
+            target_root(&self.root, &config)?
+        };
+        safe_path(&target, &config.output)?;
         self.safe_path(&config.export)?;
         self.config = config;
+        self.target_project_root = target;
+        self.artifact_root = safe_path(&self.target_project_root, ".luvyn")?;
         let files = self.discover()?;
         let mut active = std::collections::BTreeSet::new();
         let mut sources = BTreeMap::new();
@@ -171,6 +293,11 @@ impl Project {
             .into_iter()
             .chain(overlays.keys().filter(|p| p.ends_with(".lyn")).cloned())
         {
+            if overlays.contains_key(&path)
+                && (!self.is_source(&path) || self.is_ignored(&path, false)?)
+            {
+                continue;
+            }
             if !active.insert(path.clone()) {
                 continue;
             }
@@ -209,21 +336,25 @@ impl Project {
                 }
             };
             let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+            let cache_hash =
+                blake3::hash(format!("{}:{hash}", self.config.sources.join(";")).as_bytes())
+                    .to_hex()
+                    .to_string();
             sources.insert(path.clone(), hash.clone());
             self.stats.files += 1;
             if self
                 .cache
                 .files
                 .get(&path)
-                .is_some_and(|cached| cached.hash == hash)
+                .is_some_and(|cached| cached.hash == cache_hash)
             {
                 self.stats.reused += 1;
             } else {
                 self.cache.files.insert(
                     path.clone(),
                     CachedFile {
-                        hash,
-                        parsed: parser::parse(&path, &content),
+                        hash: cache_hash,
+                        parsed: self.parse_document(&path, &content),
                     },
                 );
                 self.stats.parsed += 1;
@@ -244,21 +375,58 @@ impl Project {
         Ok(&self.graph)
     }
     pub fn build(&mut self) -> Result<BuildStats> {
+        self.build_with_progress(|_| {})
+    }
+    pub fn build_with_progress(&mut self, mut progress: impl FnMut(String)) -> Result<BuildStats> {
+        // Refresh target before locking: two documentation roots may share one target.
         self.analyze(&BTreeMap::new())?;
+        let lock_path = safe_path(&self.target_project_root, ".luvyn/build.lock")?;
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
+            Error::Message(
+                "Another build is writing this workspace artifact; retry after it finishes".into(),
+            )
+        })?;
+        let started = std::time::Instant::now();
+        progress(format!("Docs: {}", self.root.display()));
+        progress(format!("Target: {}", self.target_project_root.display()));
+        progress("[build] scanning, parsing changed files, resolving and validating".into());
+        progress(format!(
+            "[build] {} .lyn files; {} parsed / {} reused",
+            self.stats.files, self.stats.parsed, self.stats.reused
+        ));
         if self.graph.has_errors() {
+            progress("[build] validation failed; last good artifact preserved".into());
             return Err(Error::Message(
                 "Build failed; fix reported diagnostics".into(),
             ));
         }
-        binary::write(&self.safe_path(&self.config.output)?, &self.graph)?;
-        self.cache.version = 1;
+        progress(format!(
+            "[build] graph: {} nodes / {} edges",
+            self.stats.symbols, self.stats.edges
+        ));
+        binary::write(&self.output_path()?, &self.graph)?;
+        progress(format!("[build] wrote {}", self.output_path()?.display()));
+        self.cache.version = 4;
         let cache =
             postcard::to_allocvec(&self.cache).map_err(|e| Error::Message(e.to_string()))?;
         atomic_write(&self.safe_path(".luvyn/cache.bin")?, &cache)?;
+        progress(format!(
+            "[build] finished in {}ms",
+            started.elapsed().as_millis()
+        ));
         Ok(self.stats.clone())
     }
     pub fn compiled(&self) -> Result<Graph> {
-        binary::read(&self.safe_path(&self.config.output)?)
+        binary::read(&self.output_path()?)
     }
     pub fn parsed(&self, path: &str) -> Option<&ParsedFile> {
         self.cache.files.get(path).map(|c| &c.parsed)
@@ -280,6 +448,28 @@ impl Project {
         }
         Ok(false)
     }
+}
+fn target_root(root: &Path, config: &ProjectConfig) -> Result<PathBuf> {
+    if !matches!(config.project.artifacts.as_str(), "ignore" | "track") {
+        return Err(Error::Message(
+            "project.artifacts must be ignore or track".into(),
+        ));
+    }
+    let path = config
+        .project
+        .target
+        .as_ref()
+        .map_or_else(|| root.to_path_buf(), |target| root.join(target));
+    let target = path.canonicalize().map_err(|e| {
+        Error::Message(format!(
+            "Target project {}: {e}; configure an existing directory",
+            path.display()
+        ))
+    })?;
+    if !target.is_dir() {
+        return Err(Error::Message("Target project must be a directory".into()));
+    }
+    Ok(target)
 }
 pub fn read_source(path: &Path) -> Result<String> {
     if fs::metadata(path)?.len() > MAX_SOURCE as u64 {

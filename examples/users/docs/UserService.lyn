@@ -1,6 +1,5 @@
-namespace example.users
-
-service UserService
+@service
+class UserService
 implements UserRepository
 
 purpose:
@@ -8,22 +7,22 @@ purpose:
 
 rules:
     - toda busca deve usar o repository
-    - usuário inexistente retorna null
+    - usuário inexistente retorna ausência (Option)
     - não pode criar usuário sem email válido
     - operações de escrita devem registrar auditoria
 
 behavior:
     ao criar um usuário, validar email antes de persistir
 
-flow:
+behavior:
     createUser: validate_email -> repository.persist -> audit
 
 depends:
     UserRepository
 
-exposes:
-    createUser(name: String, email: String) -> User?
-    getUser(id: ID) -> User?
+export:
+    func createUser(name: String, email: String) -> Option<User>
+    func getUser(id: i64) -> Option<User>
 
 source:
     src/services/UserService.java

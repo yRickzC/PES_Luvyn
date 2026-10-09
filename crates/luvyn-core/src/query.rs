@@ -90,7 +90,7 @@ pub fn search(graph: &Graph, query: &str, limit: usize) -> Vec<usize> {
         "fluxo",
         "flow",
         "dependencias",
-        "exposes",
+        "export",
         "dependencies",
     ];
     for word in query_words
@@ -237,8 +237,8 @@ pub fn query(graph: &Graph, input: &str, options: &QueryOptions) -> Result<Query
         ("onde ", "*", true),
         ("who uses ", "*", true),
         ("references to ", "references", true),
-        ("o que ", "exposes", false),
-        ("what ", "exposes", false),
+        ("o que ", "export", false),
+        ("what ", "export", false),
     ];
     for (prefix, r, reverse) in natural {
         if normalized.starts_with(prefix) {
@@ -358,32 +358,12 @@ fn result(
     }
 }
 pub fn compact_signature(signature: &str) -> String {
-    let Some((name, tail)) = signature.split_once('(') else {
-        return signature.into();
-    };
-    let Some((params, ret)) = tail.rsplit_once(')') else {
-        return signature.into();
-    };
-    let ret = ret
-        .trim()
-        .trim_start_matches("->")
-        .trim_start_matches(':')
-        .trim();
-    let params = params
-        .split(',')
-        .map(|p| p.split_whitespace().collect::<String>())
-        .collect::<Vec<_>>()
-        .join(" ");
     format!(
-        "{}{}{}{}",
-        if ret.is_empty() {
-            String::new()
-        } else {
-            format!("{ret} ")
-        },
-        name.trim(),
-        if params.is_empty() { "" } else { " " },
-        params
+        "func {}",
+        signature
+            .trim()
+            .strip_prefix("func ")
+            .unwrap_or(signature.trim())
     )
 }
 /// Compact structure, deduplicated relationships and signatures; prose is never guessed or rewritten.
@@ -420,16 +400,71 @@ fn render_context(result: &QueryResult, format: &str, budget: Option<usize>) -> 
         if s.parent.as_deref().is_some_and(|p| present.contains(p)) {
             continue;
         }
-        let mut block = format!(
-            "{}{} {}\n",
-            if format == "markdown" { "## " } else { "" },
-            s.kind,
-            s.qualified
-        );
-        if let Some(signature) = &s.signature {
-            block.push_str(&format!("api {}\n", compact_signature(signature)));
+        let mut block = if s.kind == "resource" {
+            format!(
+                "{}{}: {}\n",
+                if format == "markdown" { "## " } else { "" },
+                s.name,
+                s.signature.as_deref().unwrap_or("<unknown schema>")
+            )
+        } else {
+            format!(
+                "{}{} {}\n",
+                if format == "markdown" { "## " } else { "" },
+                s.kind,
+                s.qualified
+            )
+        };
+        for annotation in &s.annotations {
+            block.push_str(&format!(
+                "@{}{}\n",
+                annotation.name,
+                if annotation.arguments.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})", annotation.arguments.join(", "))
+                }
+            ));
+        }
+        if s.signature.is_none() && !s.generics.is_empty() {
+            block.push_str(&format!(
+                "generics: {}\n",
+                s.generics
+                    .iter()
+                    .map(|g| g
+                        .bound
+                        .as_ref()
+                        .map_or(g.name.clone(), |b| format!("{}: {b}", g.name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(signature) = &s.signature
+            && s.kind != "resource"
+        {
+            block.push_str(&format!(
+                "{} {}\n",
+                if s.kind == "func" {
+                    "api"
+                } else {
+                    "declaration"
+                },
+                if s.kind == "func" {
+                    compact_signature(signature)
+                } else {
+                    signature.clone()
+                }
+            ));
         }
         for (key, values) in &s.sections {
+            if s.kind == "resource" && key == "fields" {
+                for field in values {
+                    if let Some((name, value)) = field.split_once(':') {
+                        block.push_str(&format!("{}={}\n", name.trim(), value.trim()));
+                    }
+                }
+                continue;
+            }
             let mut seen = HashSet::new();
             let unique: Vec<_> = values
                 .iter()
@@ -440,7 +475,12 @@ fn render_context(result: &QueryResult, format: &str, budget: Option<usize>) -> 
         }
         let mut relations = std::collections::BTreeMap::<&str, Vec<&str>>::new();
         for edge in edges.get(s.id.as_str()).into_iter().flatten() {
-            if edge.relation == "exposes" && present.contains(edge.to.as_str()) {
+            if s.kind == "resource" && edge.relation == "instance_of" {
+                continue;
+            }
+            if matches!(edge.relation.as_str(), "export" | "contains")
+                && present.contains(edge.to.as_str())
+            {
                 continue;
             }
             if let Some(label) = result.labels.get(&edge.to) {
@@ -454,7 +494,18 @@ fn render_context(result: &QueryResult, format: &str, budget: Option<usize>) -> 
         }
         if let Some(apis) = children.get(s.id.as_str()) {
             for api in apis {
+                if api.kind == "field" {
+                    continue;
+                }
                 if let Some(signature) = &api.signature {
+                    for annotation in &api.annotations {
+                        block.push_str(&format!(
+                            "{} @{}({})\n",
+                            api.name,
+                            annotation.name,
+                            annotation.arguments.join(", ")
+                        ));
+                    }
                     block.push_str(&format!("api {}\n", compact_signature(signature)));
                 }
                 for (key, values) in &api.sections {

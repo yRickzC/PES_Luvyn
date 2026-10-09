@@ -1,14 +1,12 @@
-namespace example.users
-
 interface UserRepository
 
 purpose:
     contrato de persistência dos usuários
 
-exposes:
-    persist(user: User) -> User
-    findById(id: ID) -> User?
+export:
+    func persist(user: User) -> User
+    func findById(id: i64) -> Option<User>
 
 contracts:
-    - findById retorna null quando o usuário não existe
+    - findById retorna ausência (Option) quando o usuário não existe
     - persist preserva unicidade do email

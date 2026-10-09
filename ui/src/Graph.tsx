@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   ReactFlow,
   Background,
@@ -10,46 +10,49 @@ import {
   type EdgeProps,
   BaseEdge,
   EdgeLabelRenderer,
-  getBezierPath,
   ReactFlowProvider,
   useReactFlow,
 } from "@xyflow/react";
 import { Search, ExternalLink, Focus, Network } from "lucide-react";
 import "@xyflow/react/dist/style.css";
 import { api, type Symbol, type GraphResult } from "./api";
+import { layoutGraph } from "./graphLayout";
 
 function SymbolNode({ data, selected }: NodeProps) {
   const d = data as { symbol: Symbol };
   return (
     <div className={`symbol-node ${selected ? "selected" : ""}`}>
-      <Handle type="target" position={Position.Left} />
+      <Handle id="in" type="target" position={Position.Left} />
       <span className={`kind-dot ${d.symbol.kind}`} />
       <div>
         <small>{d.symbol.kind}</small>
         <strong>{d.symbol.name}</strong>
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle id="out" type="source" position={Position.Right} />
     </div>
   );
 }
 const nodeTypes = { symbol: SymbolNode };
 function RelationEdge(props: EdgeProps) {
-  const offset = Number(props.data?.offset || 0);
-  let [path, x, y] = getBezierPath(props);
-  if (offset) {
-    const delta = Math.max(90, Math.abs(props.targetX - props.sourceX) * 0.5);
-    path = `M ${props.sourceX} ${props.sourceY} C ${props.sourceX + delta} ${props.sourceY + offset} ${props.targetX - delta} ${props.targetY + offset} ${props.targetX} ${props.targetY}`;
-    x = (props.sourceX + props.targetX) / 2;
-    y = (props.sourceY + props.targetY) / 2 + offset * 0.75;
-  }
+  const path = String(props.data?.path || "");
+  const x = Number(props.data?.labelX || 0),
+    y = Number(props.data?.labelY || 0);
   return (
     <>
-      <BaseEdge path={path} markerEnd={props.markerEnd} style={props.style} />
+      <BaseEdge
+        id={props.id}
+        path={path}
+        markerEnd={props.markerEnd}
+        style={props.style}
+        interactionWidth={16}
+      />
       <EdgeLabelRenderer>
         <span
           className="relation-label nodrag nopan"
           style={{
             position: "absolute",
+            opacity: props.style?.opacity,
+            pointerEvents: "all",
             transform: `translate(-50%,-50%) translate(${x}px,${y}px)`,
           }}
         >
@@ -65,6 +68,10 @@ type Props = {
   focus: string;
   theme: string;
   revision: number;
+  mobile?: boolean;
+  depth?: number;
+  onDepthChange?: (depth: number) => void;
+  onFocusChange?: (focus: string) => void;
 };
 export function Graph(props: Props) {
   return (
@@ -73,11 +80,25 @@ export function Graph(props: Props) {
     </ReactFlowProvider>
   );
 }
-function GraphInner({ open, focus, theme, revision }: Props) {
+function GraphInner({
+  open,
+  focus,
+  theme,
+  revision,
+  mobile = false,
+  depth: externalDepth,
+  onDepthChange,
+  onFocusChange,
+}: Props) {
   const [query, setQuery] = useState(focus),
-    [depth, setDepth] = useState(1),
+    [internalDepth, setInternalDepth] = useState(1),
     [kind, setKind] = useState("all"),
     [relation, setRelation] = useState("all");
+  const depth = mobile ? (externalDepth ?? internalDepth) : internalDepth;
+  const changeDepth = (value: number) => {
+    setInternalDepth(value);
+    onDepthChange?.(value);
+  };
   const [graph, setGraph] = useState<GraphResult>({
       symbols: [],
       edges: [],
@@ -86,81 +107,141 @@ function GraphInner({ open, focus, theme, revision }: Props) {
     [selected, setSelected] = useState<Symbol | null>(null),
     [error, setError] = useState("");
   const flow = useReactFlow();
+  const [layout, setLayout] = useState<Awaited<ReturnType<typeof layoutGraph>>>(
+    { nodes: [], edges: [], truncated: false },
+  );
+  const [layoutBusy, setLayoutBusy] = useState(false);
+  const [selectedEdge, setSelectedEdge] = useState("");
+  const graphFingerprint = useRef("");
+  const depthRef = useRef(depth);
   const load = useCallback(
     async (q = query, d = depth) => {
       try {
         const data = await api("graph", {
           query: q ? `neighbors ${q}` : "",
           depth: d,
-          limit: 120,
+          limit: mobile ? 80 : 120,
         });
-        setGraph(data.result);
+        // Revisions can concern other documents. Keep viewport and avoid
+        // another worker layout when this bounded subgraph did not change.
+        const fingerprint = JSON.stringify(data.result);
+        if (fingerprint !== graphFingerprint.current) {
+          graphFingerprint.current = fingerprint;
+          setGraph(data.result);
+        }
+        setSelected((s) =>
+          s
+            ? data.result.symbols.find((n: Symbol) => n.id === s.id) || null
+            : null,
+        );
         setError("");
       } catch (e) {
         setError(String(e));
       }
     },
-    [query, depth],
+    [query, depth, mobile],
   );
   useEffect(() => {
     setQuery(focus);
+    setSelected(null);
+    setSelectedEdge("");
     void load(focus, depth);
-  }, [focus, revision]);
+  }, [focus]);
+  useEffect(() => {
+    if (depthRef.current === depth) return;
+    depthRef.current = depth;
+    void load(query, depth);
+  }, [depth]);
+  useEffect(() => {
+    void load();
+  }, [revision]);
   const kinds = [...new Set(graph.symbols.map((s) => s.kind))].sort(),
     relations = [...new Set(graph.edges.map((e) => e.relation))].sort();
   const visible = useMemo(
     () => graph.symbols.filter((s) => kind === "all" || s.kind === kind),
     [graph, kind],
   );
-  const nodes = useMemo(() => {
-    // Stable columns by namespace/kind; bounds stay predictable, even with cyclic dependencies.
-    const columns = [...new Set(visible.map((s) => s.kind))];
-    const counts: Record<string, number> = {};
-    return visible.map((s) => {
-      const row = counts[s.kind] || 0;
-      counts[s.kind] = row + 1;
-      return {
-        id: s.id,
-        type: "symbol",
-        data: { symbol: s },
-        position: { x: columns.indexOf(s.kind) * 290, y: row * 110 },
-        selected: selected?.id === s.id,
-      };
-    });
-  }, [visible, selected]);
-  const edges = useMemo(() => {
-    const ids = new Set(visible.map((s) => s.id));
-    const filtered = graph.edges.filter(
-      (e) =>
-        ids.has(e.from) &&
-        ids.has(e.to) &&
-        (relation === "all" || relation === e.relation),
-    );
-    const pairs: Record<string, number> = {},
-      seen: Record<string, number> = {};
-    for (const e of filtered) {
-      const key = `${e.from}:${e.to}`;
-      pairs[key] = (pairs[key] || 0) + 1;
-    }
-    return filtered.map((e, i) => {
-      const key = `${e.from}:${e.to}`,
-        index = seen[key] || 0;
-      seen[key] = index + 1;
-      return {
-        id: `${key}-${e.relation}-${i}`,
-        source: e.from,
-        target: e.to,
-        label: e.relation,
-        type: "relation",
-        data: { offset: (index - (pairs[key] - 1) / 2) * 40 },
-        style: { stroke: "#657398", strokeWidth: 1.3 },
-        markerEnd: { type: "arrowclosed" as any, color: "#657398" },
-      };
-    });
-  }, [graph, visible, relation]);
   useEffect(() => {
-    requestAnimationFrame(() => void flow.fitView({ padding: 0.2 }));
-  }, [graph, kind]);
+    let active = true;
+    setLayoutBusy(true);
+    layoutGraph(
+      visible,
+      graph.edges.filter((e) => relation === "all" || e.relation === relation),
+    )
+      .then((value) => {
+        if (active) {
+          setLayout(value);
+          setLayoutBusy(false);
+        }
+      })
+      .catch((e) => {
+        if (active) {
+          setError(String(e));
+          setLayoutBusy(false);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [visible, graph.edges, relation]);
+  const focusIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (selected) {
+      ids.add(selected.id);
+      for (const e of layout.edges)
+        if (e.source === selected.id || e.target === selected.id) {
+          ids.add(e.source);
+          ids.add(e.target);
+        }
+    }
+    if (selectedEdge) {
+      const e = layout.edges.find((e) => e.id === selectedEdge);
+      if (e) {
+        ids.add(e.source);
+        ids.add(e.target);
+      }
+    }
+    return ids;
+  }, [selected, selectedEdge, layout]);
+  const nodes = layout.nodes.map((n) => ({
+    ...n,
+    selected: selected?.id === n.id,
+    style: { opacity: focusIds.size && !focusIds.has(n.id) ? 0.25 : 1 },
+  }));
+  const edges = layout.edges.map((e) => {
+    const emphasized = selectedEdge
+      ? e.id === selectedEdge
+      : selected
+        ? e.source === selected.id || e.target === selected.id
+        : true;
+    return {
+      ...e,
+      selected: e.id === selectedEdge,
+      style: {
+        stroke: emphasized ? "#8b9bc3" : "#657398",
+        strokeWidth: emphasized && focusIds.size ? 2 : 1.3,
+        opacity: emphasized ? 1 : 0.15,
+      },
+      markerEnd: {
+        type: "arrowclosed" as any,
+        color: emphasized ? "#8b9bc3" : "#657398",
+        width: 12,
+        height: 12,
+      },
+    };
+  });
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      const focused =
+        mobile && layout.nodes.find((n) => n.data.symbol.qualified === focus);
+      if (focused)
+        void flow.setCenter(focused.position.x + 100, focused.position.y + 32, {
+          zoom: 1,
+        });
+      else if (mobile) void flow.fitView({ padding: 0.2, minZoom: 0.65 });
+      else void flow.fitView({ padding: 0.2 });
+    });
+  }, [layout, mobile, focus]);
   return (
     <div className="graph-workspace">
       <div className="graph-toolbar">
@@ -186,7 +267,7 @@ function GraphInner({ open, focus, theme, revision }: Props) {
             value={depth}
             onChange={(e) => {
               const d = +e.target.value;
-              setDepth(d);
+              changeDepth(d);
               void load(query, d);
             }}
           >
@@ -220,9 +301,16 @@ function GraphInner({ open, focus, theme, revision }: Props) {
         </button>
       </div>
       {error && <div className="graph-notice">{error}</div>}
+      {layoutBusy && <div className="graph-notice">Organizando grafo…</div>}
+      {layout.truncated && (
+        <div className="graph-notice">
+          Até 600 relações visuais. Reduza profundidade ou filtre uma relação.
+        </div>
+      )}
       {graph.truncated && (
         <div className="graph-notice">
-          Exibindo até 120 nodes. Pesquise um símbolo para focar contexto.
+          Visão geral limitada para manter o grafo fluido. Foque um símbolo para
+          ver relações próximas.
         </div>
       )}
       <div className="graph-canvas">
@@ -231,7 +319,19 @@ function GraphInner({ open, focus, theme, revision }: Props) {
           edges={edges}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
-          onNodeClick={(_, node) => setSelected(node.data.symbol)}
+          onNodeClick={(_, node) => {
+            setSelected(node.data.symbol);
+            setSelectedEdge("");
+          }}
+          onEdgeClick={(_, edge) => {
+            setSelected(null);
+            setSelectedEdge(edge.id);
+          }}
+          onPaneClick={() => {
+            setSelected(null);
+            setSelectedEdge("");
+          }}
+          nodesDraggable={false}
           onNodeDoubleClick={(_, node) => open(node.data.symbol)}
           fitView
           minZoom={0.1}
@@ -244,7 +344,9 @@ function GraphInner({ open, focus, theme, revision }: Props) {
             gap={24}
             size={1}
           />
-          <Controls />
+          <Controls
+            fitViewOptions={{ padding: 0.2, minZoom: mobile ? 0.65 : 0.1 }}
+          />
           <MiniMap
             pannable
             zoomable
@@ -259,8 +361,18 @@ function GraphInner({ open, focus, theme, revision }: Props) {
         )}
         {selected && (
           <aside className="graph-inspector">
+            <button onClick={() => setSelected(null)}>Fechar inspector</button>
             <small>{selected.kind}</small>
             <h3>{selected.qualified}</h3>
+            {selected.signature && <code>{selected.signature}</code>}
+            {(selected.annotations || []).map((a, i) => (
+              <p key={`annotation-${i}`}>
+                <code>
+                  @{a.name}
+                  {a.arguments.length ? `(${a.arguments.join(", ")})` : ""}
+                </code>
+              </p>
+            ))}
             {Object.entries(selected.sections || {}).map(([k, v]) => (
               <p key={k}>
                 <b>{k}</b>
@@ -297,8 +409,11 @@ function GraphInner({ open, focus, theme, revision }: Props) {
             </button>
             <button
               onClick={() => {
-                setQuery(selected.qualified);
-                void load(selected.qualified, depth);
+                if (onFocusChange) onFocusChange(selected.qualified);
+                else {
+                  setQuery(selected.qualified);
+                  void load(selected.qualified, depth);
+                }
               }}
             >
               <Focus size={14} />

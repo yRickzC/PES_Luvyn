@@ -9,9 +9,9 @@ try {
 } finally { Pop-Location }
 Push-Location $projectRoot
 try {
-    cargo test --workspace
+    cargo test --workspace --features desktop --locked
     if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
-    cargo build --release
+    cargo build --release --features desktop --locked
     if ($LASTEXITCODE -ne 0) { throw 'Rust build failed' }
 } finally { Pop-Location }
 

@@ -1,6 +1,5 @@
-namespace luvyn
-
-component IDE
+@component
+class IDE
 
 purpose:
     editar documentação real com Monaco, diagnostics e navegação semântica
@@ -23,7 +22,8 @@ source:
     ui/src/main.tsx
     crates/luvyn/src/server.rs
 
-component EditorServices
+@component
+class EditorServices
 
 purpose:
     compartilhar autocomplete, imports, hover, referências e rename validado
@@ -40,7 +40,8 @@ rules:
 source:
     crates/luvyn-core/src/editor.rs
 
-component Exporter
+@component
+class Exporter
 
 purpose:
     gerar ZIP determinístico com índice e Markdown por namespace

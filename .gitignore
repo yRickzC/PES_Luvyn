@@ -6,3 +6,11 @@ ui/dist/
 .luvyn/
 *.tmp
 
+
+apps/ide-mobile/.gradle/
+apps/ide-mobile/build/
+apps/ide-mobile/app/build/
+apps/ide-mobile/local.properties
+apps/ide-mobile/app/src/main/assets/
+apps/ide-mobile/app/src/main/jniLibs/
+dist/

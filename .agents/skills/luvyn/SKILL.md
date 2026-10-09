@@ -8,7 +8,7 @@ Use the `luvyn` CLI from the workspace root. Prefer focused queries before openi
 ```sh
 luvyn get UserService
 luvyn get "in:depends UserRepository"
-luvyn get "out:exposes UserService"
+luvyn get "out:export UserService"
 luvyn get "path UserService -> User"
 luvyn get UserService --depth 2 --limit 16 --budget 2000
 ```
@@ -17,5 +17,5 @@ The default output is compact context. Use `--format json` when structured data 
 
 `.lyn` files are editable source; `.lu` files are generated binary artifacts. Never edit `.lu`. The graph reflects the last build. After changing documentation, run `luvyn check` then `luvyn build`; use `luvyn get X --rebuild` to explicitly refresh context. Build automatically runs when no compiled artifact exists. Syntax and diagnostics include file and location; read the indicated source when intent is unclear.
 
-Follow dependencies, exposed APIs, return types and reverse references to inspect change impact. Do not replace targeted retrieval with reading the whole project when the query resolves the task. Preserve contracts, rules and behavior when editing. Imports are explicit across namespaces. Keep generated graphs and `.luvyn/` cache out of Git with `luvyn git`; commit `.lyn` sources.
+Follow dependencies, exposed APIs, return types and reverse references to inspect change impact. Do not replace targeted retrieval with reading the whole project when the query resolves the task. Preserve contracts, rules and behavior when editing. Same-module and globally unique symbols resolve without imports; use explicit imports or qualified names only to disambiguate. Use class/func/type/enum/interface, free annotations, generics and export: APIs; the authoritative syntax is available through luvyn --lang. Keep generated graphs and `.luvyn/` cache out of Git with `luvyn git`; commit `.lyn` sources.
 

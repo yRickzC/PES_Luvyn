@@ -1,4 +1,4 @@
-sources = ["docs", "examples"]
+sources = ["docs"]
 output = ".luvyn/project.lu"
 export = ".luvyn/context.zip"
 autosave = false

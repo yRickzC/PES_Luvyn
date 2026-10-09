@@ -1,0 +1,51 @@
+@component
+class LanguageCatalog
+purpose: manter dicionário oficial de sintaxe, contextos, exemplos e completion
+source: crates/luvyn-core/src/language.rs
+rules:
+    - CLI, IDE e highlighting consomem o mesmo catálogo
+    - keywords documentadas devem ser reconhecidas pelo parser
+depends: Parser
+
+@entity
+class FieldReference
+purpose: registrar referência semântica ao estado do proprietário
+fields:
+    owner: String
+    target: String
+rules:
+    - self.owner identifica somente o proprietário atual
+    - self.target precisa identificar field declarado no proprietário
+behavior:
+    resolver referência e fornecer hover, definição e rename seguro
+depends: Resolver
+
+interface GraphArtifactReader
+purpose: expor leitura validada e parcial do artefato oficial .lu
+source: crates/luvyn-core/src/binary.rs
+depends: BinaryArtifact
+contracts:
+    - consumidores não precisam do Compiler para ler nodes e edges
+    - versão incompatível e corrupção retornam erros estruturados
+
+@system
+class IdeHosts
+purpose: compartilhar estado semântico entre hosts server e desktop
+source: crates/luvyn-core/src/ide.rs
+depends: Compiler, GraphEngine, LanguageCatalog
+rules:
+    - lifecycle pertence ao host; semântica pertence ao core
+    - shutdown exige identidade autenticada do workspace
+    - Android, desktop e server reutilizam serviços semânticos do Core
+
+@model
+class GenericParameter<T>
+purpose: preservar parâmetros de tipos locais e bounds documentais
+fields:
+    name: String
+    bound: Option<String>
+    values: Vec<T>
+rules:
+    - self.name não deve colidir com outro parâmetro na mesma declaração
+    - self.bound resolve tipos existentes sem avaliação de traits
+depends: Parser

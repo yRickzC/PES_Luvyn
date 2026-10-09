@@ -10,19 +10,19 @@ use std::{
 };
 
 fn graph() -> Graph {
-    let source = "namespace test\n\nentity User\npurpose: identity\n\ninterface Repository\npurpose: persistence\nexposes:\n    save(user: User) -> User\n\nservice UserService\nimplements Repository\npurpose: gerenciar usuários\nrules:\n    - create requires valid email\n    - write records audit\nbehavior:\n    validar email antes de persistir\ndepends:\n    Repository\nexposes:\n    createUser(name: String, email: String) -> User?\n    getUser(id: ID) -> User?\n";
+    let source = "namespace test\n\nclass User\npurpose: identity\n\ninterface Repository\npurpose: persistence\nexport:\n    func save(user: User) -> User\n\nclass UserService\nimplements Repository\npurpose: gerenciar usuários\nrules:\n    - create requires valid email\n    - write records audit\nbehavior:\n    validar email antes de persistir\ndepends:\n    Repository\nexport:\n    func createUser(name: String, email: String) -> User?\n    func getUser(id: i64) -> User?\n";
     resolver::resolve(&[parser::parse("docs/users.lyn", source)], BTreeMap::new())
 }
 #[test]
 fn parser_multisymbol_signatures_comments_and_diagnostics() {
     let g = graph();
     assert!(!g.has_errors(), "{:?}", g.diagnostics);
-    assert_eq!(g.symbols.len(), 6);
+    assert_eq!(g.symbols.len(), 7);
     assert!(g.edges.iter().any(|e| e.relation == "returns"));
-    assert!(g.edges.iter().any(|e| e.relation == "exposes"));
+    assert!(g.edges.iter().any(|e| e.relation == "export"));
     let f = parser::parse(
         "broken.lyn",
-        "# comment\nservice Good\npurpose: https://example.com # ignored\nexposes:\n    broken(arg) -> Ghost\nunknown:\n    value\n",
+        "# comment\nclass Good\npurpose: https://example.com # ignored\nexport:\n    func broken(arg) -> Ghost\nunknown:\n    value\n",
     );
     assert_eq!(f.symbols[0].sections["purpose"], ["https://example.com"]);
     assert!(
@@ -31,7 +31,7 @@ fn parser_multisymbol_signatures_comments_and_diagnostics() {
             .any(|d| d.code == "L011" && d.location.file == "broken.lyn" && d.location.line == 5)
     );
     assert!(f.diagnostics.iter().any(|d| d.code == "L007"));
-    let f = parser::parse("x.lyn", "service X\npurpose: \"literal # not comment\"\n");
+    let f = parser::parse("x.lyn", "class X\npurpose: \"literal # not comment\"\n");
     assert_eq!(
         f.symbols[0].sections["purpose"],
         ["\"literal # not comment\""]
@@ -39,39 +39,34 @@ fn parser_multisymbol_signatures_comments_and_diagnostics() {
 }
 #[test]
 fn resolver_imports_aliases_ambiguity_duplicates_and_stable_ids() {
-    let a = parser::parse("a.lyn", "namespace one\nentity User\npurpose: identity\n");
+    let a = parser::parse("a.lyn", "namespace one\nclass User\npurpose: identity\n");
     let b = parser::parse(
         "b.lyn",
-        "namespace two\nimport one.User as Person\nservice S\npurpose: consumer\ndepends Person\nexposes:\n    use(person: Person) -> one.User\n",
+        "namespace two\nimport one.User as Person\nclass S\npurpose: consumer\ndepends Person\nexport:\n    func use(person: Person) -> one.User\n",
     );
     let g = resolver::resolve(&[a.clone(), b], BTreeMap::new());
     assert!(!g.has_errors(), "{:?}", g.diagnostics);
     let missing = parser::parse(
         "c.lyn",
-        "namespace two\nservice S\npurpose: consumer\ndepends User\n",
+        "namespace two\nclass S\npurpose: consumer\ndepends User\n",
     );
-    assert!(
-        resolver::resolve(&[a.clone(), missing], BTreeMap::new())
-            .diagnostics
-            .iter()
-            .any(|d| d.code == "S004")
-    );
+    assert!(!resolver::resolve(&[a.clone(), missing], BTreeMap::new()).has_errors());
     let duplicate = resolver::resolve(&[a.clone(), a], BTreeMap::new());
     assert!(duplicate.diagnostics.iter().any(|d| d.code == "S001"));
     let ambiguous = resolver::resolve(
         &[
-            parser::parse("a.lyn", "namespace one\nentity User\npurpose: x"),
-            parser::parse("b.lyn", "namespace two\nentity User\npurpose: x"),
+            parser::parse("a.lyn", "namespace one\nclass User\npurpose: x"),
+            parser::parse("b.lyn", "namespace two\nclass User\npurpose: x"),
             parser::parse(
                 "c.lyn",
-                "namespace three\nimport one.User\nimport two.User\nservice S\npurpose: x\ndepends User",
+                "namespace three\nimport one.User\nimport two.User\nclass S\npurpose: x\ndepends User",
             ),
         ],
         BTreeMap::new(),
     );
     assert!(ambiguous.diagnostics.iter().any(|d| d.code == "S003"));
     assert_eq!(
-        stable_id("one.User", "entity"),
+        stable_id("one.User", "class"),
         g.symbols
             .iter()
             .find(|s| s.qualified == "one.User")
@@ -81,11 +76,14 @@ fn resolver_imports_aliases_ambiguity_duplicates_and_stable_ids() {
     let moved = resolver::resolve(
         &[parser::parse(
             "moved.lyn",
-            "\nnamespace one\n\nentity User\npurpose: changed wording\n",
+            "\nnamespace one\n\nclass User\npurpose: changed wording\n",
         )],
         BTreeMap::new(),
     );
-    assert_eq!(moved.symbols[0].id, stable_id("one.User", "entity"));
+    assert_eq!(
+        moved.symbols.iter().find(|s| s.kind == "class").unwrap().id,
+        stable_id("one.User", "class")
+    );
 }
 #[test]
 fn indexed_queries_fuzzy_natural_paths_cycles_and_budget() {
@@ -121,7 +119,7 @@ fn indexed_queries_fuzzy_natural_paths_cycles_and_budget() {
     let cyclic = resolver::resolve(
         &[parser::parse(
             "cycle.lyn",
-            "service A\npurpose: a\ndepends B\nservice B\npurpose: b\ndepends A",
+            "class A\npurpose: a\ndepends B\nclass B\npurpose: b\ndepends A",
         )],
         BTreeMap::new(),
     );
@@ -137,7 +135,7 @@ fn indexed_queries_fuzzy_natural_paths_cycles_and_budget() {
         .unwrap()
         .symbols
         .len(),
-        2
+        3
     );
     let text = query::render(&exact, "compact", 64).unwrap();
     assert!(text.contains("budget") || text.chars().count() <= 256);
@@ -199,27 +197,27 @@ fn export_is_deterministic_semantic_and_lossless() {
         .unwrap()
         .read_to_string(&mut document)
         .unwrap();
-    assert!(document.contains("User? createUser name:String email:String"));
+    assert!(document.contains("func createUser(name: String, email: String) -> User?"));
     assert!(document.contains("create requires valid email"));
     assert!(document.contains("validar email antes de persistir"));
     assert!(document.contains("# namespace test"));
     assert!(document.contains("implements: Repository"));
-    assert!(!document.contains("exposes:\n"));
+    assert!(!document.contains("export:\n"));
 }
 #[test]
 fn incremental_build_ignores_io_failures_and_preserves_last_good_artifact() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("a.lyn"), "service A\npurpose: a\n").unwrap();
+    fs::write(dir.path().join("a.lyn"), "class A\npurpose: a\n").unwrap();
     fs::write(
         dir.path().join("b.lyn"),
-        "service B\npurpose: b\ndepends A\n",
+        "import a.A\nclass B\npurpose: b\ndepends A\n",
     )
     .unwrap();
     let mut p = Project::open(dir.path()).unwrap();
     assert_eq!(p.build().unwrap().parsed, 2);
     let bytes = fs::read(dir.path().join(".luvyn/project.lu")).unwrap();
     assert_eq!(p.build().unwrap().reused, 2);
-    fs::write(dir.path().join("a.lyn"), "service A\npurpose: different\n").unwrap();
+    fs::write(dir.path().join("a.lyn"), "class A\npurpose: different\n").unwrap();
     let stats = p.build().unwrap();
     assert_eq!(stats.parsed, 1);
     assert_eq!(stats.reused, 1);
@@ -229,7 +227,7 @@ fn incremental_build_ignores_io_failures_and_preserves_last_good_artifact() {
     assert_ne!(bytes, last_good);
     fs::write(
         dir.path().join("b.lyn"),
-        "service B\npurpose: b\ndepends Missing\n",
+        "class B\npurpose: b\ndepends Missing\n",
     )
     .unwrap();
     assert!(p.build().is_err());
@@ -247,10 +245,32 @@ fn incremental_build_ignores_io_failures_and_preserves_last_good_artifact() {
     assert!(p.safe_path(".git/config").is_err());
 }
 #[test]
+fn workspace_build_lock_protects_last_good_artifact_across_clients() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.lyn"), "class A\npurpose: identity\n").unwrap();
+    let mut first = Project::open(dir.path()).unwrap();
+    first.build().unwrap();
+    let artifact = dir.path().join(".luvyn/project.lu");
+    let last_good = fs::read(&artifact).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dir.path().join(".luvyn/build.lock"))
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    fs::write(dir.path().join("a.lyn"), "class A\npurpose: changed\n").unwrap();
+    let mut second = Project::open(dir.path()).unwrap();
+    assert!(second.build().is_err());
+    assert_eq!(fs::read(&artifact).unwrap(), last_good);
+    fs2::FileExt::unlock(&lock).unwrap();
+    second.build().unwrap();
+    assert_ne!(fs::read(&artifact).unwrap(), last_good);
+}
+#[test]
 fn editor_imports_completion_utf16_and_safe_rename() {
     let dir = tempfile::tempdir().unwrap();
-    let a = "namespace one\nentity User\npurpose: identity\n";
-    let b = "namespace two\nservice S\npurpose: consumer\ndepends User\n";
+    let a = "namespace one\nclass User\npurpose: identity\n";
+    let b = "namespace two\nclass S\npurpose: consumer\ndepends User\n";
     fs::write(dir.path().join("a.lyn"), a).unwrap();
     fs::write(dir.path().join("b.lyn"), b).unwrap();
     let mut p = Project::open(dir.path()).unwrap();
@@ -259,7 +279,7 @@ fn editor_imports_completion_utf16_and_safe_rename() {
     assert!(
         completions
             .iter()
-            .any(|c| c.label == "User" && c.import.is_some())
+            .any(|c| c.label == "User" && c.import.is_none())
     );
     let imports = editor::missing_imports(&p, "b.lyn", b);
     let sources = BTreeMap::from([("a.lyn".into(), a.into()), ("b.lyn".into(), b.into())]);
@@ -276,8 +296,8 @@ fn editor_imports_completion_utf16_and_safe_rename() {
         .clone();
     let edits = editor::rename(&p, &id, "Person", &changed).unwrap();
     let changed = editor::apply_edits(&changed, &edits).unwrap();
-    assert!(changed["a.lyn"].contains("entity Person"));
-    assert!(changed["b.lyn"].contains("import one.Person"));
+    assert!(changed["a.lyn"].contains("class Person"));
+    assert!(!changed["b.lyn"].contains("import "));
     assert!(changed["b.lyn"].contains("depends Person"));
     assert!(editor::rename(&p, &id, "bad name", &sources).is_err());
     let location = Location {
@@ -293,7 +313,7 @@ fn editor_imports_completion_utf16_and_safe_rename() {
 #[test]
 fn rename_updates_repeated_signature_types_and_not_prose() {
     let dir = tempfile::tempdir().unwrap();
-    let text = "entity User\npurpose: User identity\nservice S\npurpose: User manager\nexposes:\n    pair(left: User, right: User) -> User\n";
+    let text = "class User\npurpose: User identity\nclass S\npurpose: User manager\nexport:\n    func pair(left: User, right: User) -> User\n";
     fs::write(dir.path().join("x.lyn"), text).unwrap();
     let mut p = Project::open(dir.path()).unwrap();
     p.analyze(&BTreeMap::new()).unwrap();
@@ -313,7 +333,7 @@ fn rename_updates_repeated_signature_types_and_not_prose() {
 }
 #[test]
 fn formatter_is_idempotent_and_preserves_comments() {
-    let input = "service S  \n\n\npurpose:\n  hello # explanation \n# keep\n\n";
+    let input = "class S  \n\n\npurpose:\n  hello # explanation \n# keep\n\n";
     let formatted = formatter::format(input);
     assert_eq!(formatted, formatter::format(&formatted));
     assert!(formatted.contains("    hello # explanation"));
@@ -335,17 +355,17 @@ fn formatter_is_idempotent_and_preserves_comments() {
 
 #[test]
 fn unicode_hover_and_global_export_do_not_collide_with_root_namespace() {
-    let global = parser::parse("global.lyn", "entity User\npurpose: identity\n");
+    let global = parser::parse("global.lyn", "class User\npurpose: identity\n");
     let named = parser::parse(
         "named.lyn",
-        "namespace root\nentity User\npurpose: distinct identity\n",
+        "namespace root\nclass User\npurpose: distinct identity\n",
     );
     let graph = resolver::resolve(std::slice::from_ref(&global), BTreeMap::new());
     let symbol = editor::symbol_at(&graph, "prose.lyn", 1, 5, "😀 User").unwrap();
     assert_eq!(symbol.name, "User");
     let graph = resolver::resolve(&[global, named], BTreeMap::new());
     let mut zip = zip::ZipArchive::new(Cursor::new(export::bytes(&graph).unwrap())).unwrap();
-    assert!(zip.by_name("GLOBAL.md").is_ok());
+    assert!(zip.by_name("modules/global.md").is_ok());
     assert!(zip.by_name("modules/root.md").is_ok());
 }
 

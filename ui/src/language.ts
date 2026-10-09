@@ -32,7 +32,8 @@ export function registerLanguage() {
     brackets: [
       ["(", ")"],
       ["[", "]"],
-      ["<", ">"],
+      // Angle operators are validated by Core, not Monaco's bracket scanner:
+      // -> contains a > that is not a closing generic bracket.
     ],
     autoClosingPairs: [
       { open: "(", close: ")" },
@@ -45,41 +46,52 @@ export function registerLanguage() {
       { open: '"', close: '"' },
     ],
     indentationRules: {
-      increaseIndentPattern:
-        /^\s*(purpose|rules|behavior|responsibilities|contracts|depends|implements|uses|returns|emits|listens|references|extends|related|exposes|fields|values|flow|notes|metadata|source):\s*$/,
+      increaseIndentPattern: /^\s*[a-z]+:\s*$/,
       decreaseIndentPattern: /^\S/,
     },
     wordPattern: /[\p{L}_][\p{L}\p{N}_.:]*/u,
   });
-  monaco.languages.setMonarchTokensProvider("lyn", {
-    tokenizer: {
-      root: [
-        [/#.*$|\/\/.*$/, "comment"],
-        [
-          /^\s*(class|service|interface|component|system|entity|module|func|function|event|struct|enum|concept)\b/,
-          "keyword",
+  const configureTokens = (
+    entries: { keyword: string; category: string; aliases: string[] }[],
+  ) =>
+    monaco.languages.setMonarchTokensProvider("lyn", {
+      keywords: entries
+        .filter((e) => !e.category.endsWith("Types"))
+        .flatMap((e) => [e.keyword, ...e.aliases]),
+      types: entries
+        .filter((e) => e.category.endsWith("Types"))
+        .map((e) => e.keyword),
+      tokenizer: {
+        root: [
+          [/#.*$|\/\/.*$/, "comment"],
+          [/^\s*[a-z]+(?=:)/, "type.identifier"],
+          [/"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'/, "string"],
+          [
+            /[a-zA-Z_][\w]*/,
+            {
+              cases: {
+                "@keywords": "keyword",
+                "@types": "type",
+                "@default": "identifier",
+              },
+            },
+          ],
+          [/@[a-zA-Z_][\w.]*/, "annotation"],
+          [/->|::|>>|[.:?<>|=]/, "operator"],
+          [/[()[\]]/, "delimiter"],
         ],
-        [
-          /\b(namespace|import|as|implements|depends|uses|returns|emits|listens|extends|related|references|link)\b/,
-          "keyword",
-        ],
-        [/^\s*[a-z]+(?=:)/, "type.identifier"],
-        [
-          /\b(String|ID|Bool|Int|Float|Void|Date|Any|List|Map|Result|Option)\b/,
-          "type",
-        ],
-        [/"[^"\\]*(?:\\.[^"\\]*)*"|'[^'\\]*(?:\\.[^'\\]*)*'/, "string"],
-        [/\b[A-Z][\w.]*/, "type"],
-        [/->|[:?<>|]/, "operator"],
-        [/[()[\]]/, "delimiter"],
-      ],
-    },
-  });
+      },
+    });
+  configureTokens([]);
+  void api("language")
+    .then((data) => configureTokens(data.entries))
+    .catch((e) => console.error(e));
   monaco.editor.defineTheme("luvyn-dark", {
     base: "vs-dark",
     inherit: true,
     rules: [
       { token: "keyword", foreground: "AFA6F8" },
+      { token: "annotation", foreground: "D3B781" },
       { token: "type", foreground: "86BCD9" },
       { token: "type.identifier", foreground: "92A7D2" },
       { token: "comment", foreground: "717D98" },
@@ -121,6 +133,7 @@ export function registerLanguage() {
       const { items } = await api("completion", {
         file: fileOf(model),
         line: position.lineNumber,
+        column: position.column,
       });
       const word = model.getWordUntilPosition(position);
       return {
@@ -129,7 +142,9 @@ export function registerLanguage() {
           detail: item.detail,
           kind: item.snippet
             ? monaco.languages.CompletionItemKind.Snippet
-            : monaco.languages.CompletionItemKind.Class,
+            : word.word.startsWith("self.")
+              ? monaco.languages.CompletionItemKind.Field
+              : monaco.languages.CompletionItemKind.Class,
           insertText: item.insert,
           insertTextRules: item.snippet
             ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
@@ -137,7 +152,9 @@ export function registerLanguage() {
           range: {
             startLineNumber: position.lineNumber,
             endLineNumber: position.lineNumber,
-            startColumn: word.startColumn,
+            startColumn: word.word.startsWith("self.")
+              ? word.startColumn + 5
+              : word.startColumn,
             endColumn: word.endColumn,
           },
           additionalTextEdits: item.import
@@ -203,29 +220,48 @@ export function registerLanguage() {
     provideDocumentSymbols: async (model) => {
       await bridge.sync(model);
       const data = await api("snapshot");
-      return data.symbols
-        .filter((s: Symbol) => s.location.file === fileOf(model))
-        .map((s: Symbol) => ({
-          name: s.name,
-          detail: s.kind,
-          kind:
-            s.kind === "func"
+      const symbols: Symbol[] = data.symbols.filter(
+        (s: Symbol) => s.location.file === fileOf(model),
+      );
+      const outline = (s: Symbol): monaco.languages.DocumentSymbol => ({
+        name: s.name,
+        detail: s.kind,
+        tags: [],
+        kind:
+          s.kind === "module"
+            ? monaco.languages.SymbolKind.Module
+            : s.kind === "func"
               ? monaco.languages.SymbolKind.Function
-              : monaco.languages.SymbolKind.Class,
-          tags: [],
-          range: {
-            startLineNumber: s.location.line,
-            startColumn: 1,
-            endLineNumber: s.end_line,
-            endColumn: 1,
-          },
-          selectionRange: {
-            startLineNumber: s.location.line,
-            startColumn: s.location.column,
-            endLineNumber: s.location.line,
-            endColumn: s.location.column + s.location.length,
-          },
-        }));
+              : s.kind === "field"
+                ? monaco.languages.SymbolKind.Field
+                : monaco.languages.SymbolKind.Class,
+        range: {
+          startLineNumber: s.location.line,
+          startColumn: 1,
+          endLineNumber: s.end_line,
+          endColumn: model.getLineMaxColumn(
+            Math.min(s.end_line, model.getLineCount()),
+          ),
+        },
+        selectionRange: {
+          startLineNumber: s.location.line,
+          startColumn: s.location.column,
+          endLineNumber: s.location.line,
+          endColumn: s.location.column + s.location.length,
+        },
+        children: symbols
+          .filter((child) =>
+            s.kind === "module"
+              ? child.kind !== "module" &&
+                !child.parent &&
+                child.namespace === s.namespace
+              : child.parent === s.id,
+          )
+          .map(outline),
+      });
+      return symbols
+        .filter((s) => s.kind === "module" || s.kind === "main")
+        .map(outline);
     },
   });
   monaco.languages.registerDocumentFormattingEditProvider("lyn", {
@@ -244,7 +280,10 @@ export function registerLanguage() {
           range: {
             startLineNumber: position.lineNumber,
             endLineNumber: position.lineNumber,
-            startColumn: word?.startColumn || position.column,
+            startColumn:
+              word?.word.startsWith("self.") && data.symbol.kind === "field"
+                ? word.startColumn + 5
+                : word?.startColumn || position.column,
             endColumn: word?.endColumn || position.column,
           },
         };
@@ -285,21 +324,51 @@ export function registerLanguage() {
   monaco.languages.registerCodeActionProvider("lyn", {
     provideCodeActions: async (model, _range, context) => {
       const actions: monaco.languages.CodeAction[] = [];
-      if (context.markers.some((m) => m.code === "S004")) {
-        const data = await api("imports", { file: fileOf(model) });
-        if (data.edits.length)
+      for (const marker of context.markers.filter((m) => m.code === "S003")) {
+        const data = await api("ambiguous-options", {
+          file: fileOf(model),
+          line: marker.startLineNumber,
+        });
+        for (const option of data.options)
           actions.push({
-            title: "Adicionar imports ausentes",
+            title: option.title,
             kind: "quickfix",
-            diagnostics: context.markers.filter((m) => m.code === "S004"),
+            diagnostics: [marker],
             edit: {
-              edits: data.edits.map((e: Edit) => ({
-                resource: model.uri,
-                versionId: undefined,
-                textEdit: { range: e.range, text: e.text },
-              })),
+              edits: [
+                {
+                  resource: model.uri,
+                  versionId: undefined,
+                  textEdit: { range: option.range, text: option.text },
+                },
+              ],
             },
           });
+      }
+      for (const marker of context.markers.filter((m) =>
+        ["L102", "L103", "L104"].includes(String(m.code)),
+      )) {
+        const old = model.getValueInRange(marker);
+        const replacement =
+          marker.code === "L102"
+            ? "@module\nclass"
+            : marker.code === "L103"
+              ? `Option<${old.slice(0, -1)}>`
+              : `->${old.slice(1)}`;
+        actions.push({
+          title: `Migrar para ${replacement}`,
+          kind: "quickfix",
+          diagnostics: [marker],
+          edit: {
+            edits: [
+              {
+                resource: model.uri,
+                versionId: undefined,
+                textEdit: { range: marker, text: replacement },
+              },
+            ],
+          },
+        });
       }
       for (const marker of context.markers.filter((m) => m.code === "S005")) {
         const suggestion = marker.message.match(/Did you mean ([\w.]+)\?/);

@@ -1,6 +1,5 @@
-namespace luvyn
-
-module Compiler
+@component
+class Compiler
 
 purpose:
     compilar fontes .lyn em documentação semântica consultável
@@ -15,13 +14,14 @@ rules:
     - falha de validação preserva o último artefato válido
     - recompilar somente documentos cujo hash mudou
 
-exposes:
-    build(workspace: String) -> BinaryArtifact
+export:
+    func build(workspace: String) -> BinaryArtifact
 
 source:
     crates/luvyn-core/src/workspace.rs
 
-component Parser
+@component
+class Parser
 
 purpose:
     reconhecer declarações, seções, assinaturas e referências sem executar código
@@ -31,29 +31,31 @@ rules:
     - fonte inválida produz diagnostics sem panic
     - indentação usa espaços
 
-exposes:
-    parse(path: String, text: String) -> GraphEngine
+export:
+    func parse(path: String, text: String) -> GraphEngine
 
 source:
     crates/luvyn-core/src/parser.rs
 
-component Resolver
+@component
+class Resolver
 
 purpose:
-    resolver símbolos locais, imports explícitos e nomes qualificados
+    resolver símbolos locais, nomes únicos globais, imports explícitos e nomes qualificados
 
 depends:
     Parser
 
 rules:
-    - namespaces diferentes exigem import ou nome qualificado
+    - nomes únicos no projeto não exigem imports; colisões exigem desambiguação
     - nomes ambíguos nunca são escolhidos automaticamente
     - IDs derivam do namespace, nome e kind; localização não altera identidade
 
 source:
     crates/luvyn-core/src/resolver.rs
 
-system GraphEngine
+@system
+class GraphEngine
 
 purpose:
     recuperar apenas símbolos e relações relevantes para uma consulta
@@ -69,13 +71,14 @@ rules:
     - consultas não dependem de LLM externo
     - índices incluem nomes, termos, relações diretas e reversas
 
-exposes:
-    query(text: String, depth: Int) -> String
+export:
+    func query(text: String, depth: usize) -> String
 
 source:
     crates/luvyn-core/src/query.rs
 
-struct BinaryArtifact
+@struct
+class BinaryArtifact
 
 purpose:
     persistir grafo versionado com registros de nodes acessíveis individualmente
@@ -88,3 +91,12 @@ rules:
 
 source:
     crates/luvyn-core/src/binary.rs
+
+main:
+    purpose:
+        compilar documentação estrutural em contexto de IA por CLI e IDE compartilhadas
+    depends:
+        Compiler
+    export:
+        IDE
+        GraphArtifactReader

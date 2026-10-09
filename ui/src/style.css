@@ -42,12 +42,12 @@ body {
   margin: 0;
   overflow: hidden;
 }
-button,
-input,
-select {
+button:not(.monaco-editor *),
+input:not(.monaco-editor *),
+select:not(.monaco-editor *) {
   font: inherit;
 }
-button {
+button:not(.monaco-editor *) {
   border: 0;
   color: inherit;
   background: none;
@@ -57,22 +57,22 @@ button {
   justify-content: center;
   gap: 7px;
 }
-button:hover {
+button:not(.monaco-editor *):hover {
   background: var(--raised);
   color: var(--text);
 }
-button:disabled {
+button:not(.monaco-editor *):disabled {
   opacity: 0.45;
   cursor: wait;
 }
-button:focus-visible,
-input:focus-visible,
-select:focus-visible {
+button:not(.monaco-editor *):focus-visible,
+input:not(.monaco-editor *):focus-visible,
+select:not(.monaco-editor *):focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: -1px;
 }
-input,
-select {
+input:not(.monaco-editor *),
+select:not(.monaco-editor *) {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--line);
@@ -80,13 +80,13 @@ select {
   border-radius: 3px;
   min-width: 0;
 }
-input::placeholder {
+input:not(.monaco-editor *)::placeholder {
   color: var(--muted);
 }
-input[type="checkbox"] {
+input:not(.monaco-editor *)[type="checkbox"] {
   accent-color: var(--accent);
 }
-kbd {
+kbd:not(.monaco-editor *) {
   font-family: inherit;
   font-size: 10px;
   border: 1px solid var(--line);
@@ -477,8 +477,21 @@ small {
   position: absolute;
   inset: 0;
 }
-.hidden {
+.editor-host.hidden {
   visibility: hidden;
+  pointer-events: none;
+}
+/* Plain Monaco control tooltips must not intercept the controls they describe.
+   Keep rich symbol hovers and tooltips containing actions interactive. */
+.context-view:has(.monaco-hover.workbench-hover.compact.with-pointer):not(
+    :has(a, button, input, [role="button"], [role="link"])
+  ),
+.workbench-hover-container:has(
+    > .monaco-hover.workbench-hover.compact.with-pointer
+  ):not(:has(a, button, input, [role="button"], [role="link"])),
+.monaco-hover.workbench-hover.compact.with-pointer:not(
+    :has(a, button, input, [role="button"], [role="link"])
+  ) {
   pointer-events: none;
 }
 .bottom-panel {
@@ -846,6 +859,8 @@ small {
   background: var(--bg);
 }
 .symbol-node {
+  width: 200px;
+  height: 64px;
   border: 1px solid #4b5878;
   background: var(--panel);
   color: var(--text);
@@ -853,7 +868,7 @@ small {
   display: flex;
   gap: 10px;
   align-items: center;
-  min-width: 185px;
+  min-width: 200px;
   padding: 11px 16px;
   box-shadow: 0 2px 7px #0002;
 }
@@ -861,10 +876,86 @@ small {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px var(--accent);
 }
+.language-sidebar {
+  overflow: auto;
+  padding: 12px;
+  flex: 1;
+  min-height: 0;
+}
+.language-sidebar input {
+  width: 100%;
+  margin-bottom: 16px;
+}
+.language-sidebar h4 {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 16px 0 6px;
+}
+.language-sidebar section > button {
+  display: flex;
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  justify-content: space-between;
+}
+.language-sidebar button.active {
+  color: var(--accent);
+  background: var(--hover);
+}
+.language-sidebar small {
+  color: var(--muted);
+}
+.language-details {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 32px 42px;
+  background: var(--bg);
+}
+.language-details h1 {
+  font:
+    26px Consolas,
+    monospace;
+  color: var(--accent);
+  margin: 10px 0 20px;
+}
+.language-details h3 {
+  font-size: 12px;
+  margin-top: 26px;
+  color: var(--muted);
+}
+.language-details p,
+.language-details li {
+  max-width: 760px;
+  line-height: 1.7;
+}
+.language-details pre {
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-width: 850px;
+  white-space: pre-wrap;
+  font-family: Consolas, monospace;
+  line-height: 1.7;
+}
+.language-related {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.language-related button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+}
 .symbol-node small {
   font-size: 10px;
 }
 .symbol-node strong {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   display: block;
   font-family: Consolas, monospace;
   font-size: 13px;
@@ -1251,6 +1342,28 @@ small {
   }
 }
 @media (max-width: 520px) {
+  .titlebar {
+    height: auto;
+    min-height: 43px;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 5px 8px;
+    padding: 5px 8px;
+  }
+  .brand {
+    width: auto;
+    flex: 0 0 92px;
+  }
+  .workspace-command {
+    width: auto;
+    max-width: none;
+    min-width: 0;
+    flex: 1 1 150px;
+  }
+  .title-actions {
+    width: auto;
+    flex: 0 0 auto;
+  }
   .sidebar {
     width: 140px;
   }
@@ -1281,7 +1394,9 @@ small {
   }
   .editor-breadcrumb {
     padding: 0 7px;
+    min-width: 0;
   }
+  .build-actions { display: flex; flex: 0 0 auto; }
   .build-actions button:first-child {
     display: none;
   }

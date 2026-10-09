@@ -47,11 +47,26 @@ pub struct Import {
     pub location: Location,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Annotation {
+    pub name: String,
+    /// Documentary arguments, preserving spelling and quoted values. Never evaluated.
+    pub arguments: Vec<String>,
+    pub location: Location,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenericParameter {
+    pub name: String,
+    pub bound: Option<String>,
+    pub location: Location,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParsedSymbol {
     pub kind: String,
     pub name: String,
     pub parent: Option<String>,
     pub signature: Option<String>,
+    pub annotations: Vec<Annotation>,
+    pub generics: Vec<GenericParameter>,
     pub sections: BTreeMap<String, Vec<String>>,
     pub references: Vec<Reference>,
     pub location: Location,
@@ -75,6 +90,8 @@ pub struct Symbol {
     pub namespace: String,
     pub parent: Option<String>,
     pub signature: Option<String>,
+    pub annotations: Vec<Annotation>,
+    pub generics: Vec<GenericParameter>,
     pub sections: BTreeMap<String, Vec<String>>,
     pub location: Location,
     pub end_line: u32,
@@ -142,6 +159,14 @@ impl Graph {
                     .values()
                     .flatten()
                     .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let content = format!(
+                "{content} {}",
+                s.annotations
+                    .iter()
+                    .map(|a| format!("@{} {}", a.name, a.arguments.join(" ")))
                     .collect::<Vec<_>>()
                     .join(" ")
             );

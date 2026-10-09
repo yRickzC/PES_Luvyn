@@ -9,25 +9,52 @@ pub fn git(project: &Project) -> Result<()> {
     } else {
         String::new()
     };
-    let mut additions = vec!["*.lu".to_string(), ".luvyn/".into()];
-    if !project.config.output.starts_with(".luvyn/") {
+    let mut additions = vec![
+        "/.luvyn/cache.bin".into(),
+        "/.luvyn/*.lock".into(),
+        "/.luvyn/ide-*".into(),
+        "/.luvyn/dist/".into(),
+        "/.luvyn/*.zip".into(),
+    ];
+    if project.config.project.artifacts == "ignore" {
+        additions.push("*.lu".into());
+    } else {
+        // Explicit negation works even when an earlier rule ignores the directory.
+        additions.extend(["!/.luvyn/".into(), "!/.luvyn/project.lu".into()]);
+    }
+    if project.root == project.target_project_root
+        && project.config.project.artifacts == "ignore"
+        && !project.config.output.starts_with(".luvyn/")
+    {
         additions.push(format!("/{}", project.config.output));
     }
     if !project.config.export.starts_with(".luvyn/") {
         additions.push(format!("/{}", project.config.export));
     }
-    let existing: std::collections::HashSet<_> =
-        content.lines().map(str::trim).map(str::to_string).collect();
-    let additions: Vec<_> = additions
-        .into_iter()
-        .filter(|entry| !existing.contains(entry))
-        .collect();
-    if !additions.is_empty() {
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(&additions.join("\n"));
+    const BEGIN: &str = "# Luvyn generated artifacts";
+    const END: &str = "# End Luvyn generated artifacts";
+    if let Some(start) = content.find(BEGIN)
+        && let Some(relative_end) = content[start..].find(END)
+    {
+        let end = start + relative_end + END.len();
+        let end = if content[end..].starts_with('\n') {
+            end + 1
+        } else {
+            end
+        };
+        content.replace_range(start..end, "");
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
         content.push('\n');
+    }
+    content.push_str(BEGIN);
+    content.push('\n');
+    content.push_str(&additions.join("\n"));
+    content.push('\n');
+    content.push_str(END);
+    content.push('\n');
+    let original = fs::read_to_string(&path).unwrap_or_default();
+    if content != original {
         atomic_write(&path, content.as_bytes())?;
     }
     Ok(())

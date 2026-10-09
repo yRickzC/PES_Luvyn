@@ -1,0 +1,9 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'dev.luvyn.mobile'
+    compileSdk 36
+    defaultConfig { applicationId 'dev.luvyn.mobile'; minSdk 26; targetSdk 36; versionCode 1; versionName '0.1.0'; testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packaging { jniLibs { useLegacyPackaging = false } }
+}
+dependencies { implementation 'com.google.android.gms:play-services-auth:22.0.0'; implementation 'androidx.webkit:webkit:1.12.1'; implementation 'androidx.documentfile:documentfile:1.0.1'; androidTestImplementation 'androidx.test:runner:1.6.2'; androidTestImplementation 'androidx.test.ext:junit:1.2.1' }

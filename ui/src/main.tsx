@@ -1,7 +1,9 @@
+import { ProjectsGate } from "./Projects";
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Files,
+  BookOpen,
   Search,
   Network,
   Settings,
@@ -40,6 +42,12 @@ import {
   bridge,
 } from "./language";
 import { Graph } from "./Graph";
+import {
+  useDictionary,
+  LanguageSidebar,
+  LanguageDetails,
+  type LanguageEntry,
+} from "./Dictionary";
 import "./style.css";
 
 registerLanguage();
@@ -51,12 +59,24 @@ type Tab = {
   conflict: boolean;
   version: number;
   view?: monaco.editor.ICodeEditorViewState | null;
+  markerFingerprint?: string;
   subscription?: monaco.IDisposable;
 };
 type Modal = { type: "file" | "folder" | "move"; file?: string };
 type Palette = { mode: "commands" | "symbols"; query: string };
 
-function App() {
+function App({
+  onProjects,
+  onSync,
+  currentIsCloud,
+}: {
+  onProjects: () => void;
+  onSync: () => Promise<void>;
+  currentIsCloud: boolean;
+}) {
+  const dictionary = useDictionary();
+  const [languageKeyword, setLanguageKeyword] = useState("self");
+  const operationRef = useRef(false);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null),
     [tabs, setTabs] = useState<Tab[]>([]),
     [active, setActive] = useState("");
@@ -106,7 +126,30 @@ function App() {
     ]);
     setPanel(true);
   }, []);
+  useEffect(() => {
+    const back = () => {
+      if (tabsRef.current.some((tab) => tab.dirty)) {
+        alert("Salve alterações antes de trocar de projeto.");
+        return;
+      }
+      onProjects();
+    };
+    window.addEventListener("luvyn-projects-request", back);
+    return () => window.removeEventListener("luvyn-projects-request", back);
+  }, [onProjects]);
+  useEffect(() => {
+    const request = (event: Event) => {
+      if (tabsRef.current.some((tab) => tab.dirty)) {
+        notify("Salve alterações antes de sincronizar.");
+        return;
+      }
+      (event as CustomEvent).detail.run();
+    };
+    window.addEventListener("luvyn-sync-request", request);
+    return () => window.removeEventListener("luvyn-sync-request", request);
+  }, [notify]);
   const sync = useCallback(async (model: monaco.editor.ITextModel) => {
+    if (!fileOf(model).endsWith(".lyn")) return;
     await api("edit", { file: fileOf(model), text: model.getValue() });
   }, []);
   const refresh = useCallback(async () => {
@@ -125,7 +168,9 @@ function App() {
       snapshotRef.current = data;
       setSnapshot(data);
       for (const tab of tabsRef.current) {
-        const disk = data.files.find((f) => f.path === tab.file);
+        const disk = [...data.files, ...(data.configs || [])].find(
+          (f) => f.path === tab.file,
+        );
         if ((disk?.hash ?? null) !== tab.hash) {
           if (tab.dirty) {
             tab.conflict = true;
@@ -149,10 +194,16 @@ function App() {
             touch();
           }
         }
+        const diagnostics = data.diagnostics.filter(
+          (d) => d.diagnostic.location.file === tab.file,
+        );
+        const fingerprint = JSON.stringify(diagnostics);
+        if (fingerprint === tab.markerFingerprint) continue;
+        tab.markerFingerprint = fingerprint;
         monaco.editor.setModelMarkers(
           tab.model,
           "luvyn",
-          data.diagnostics
+          diagnostics
             .filter((d) => d.diagnostic.location.file === tab.file)
             .map((d) => ({
               ...d.range,
@@ -403,14 +454,29 @@ function App() {
     hash: string | null;
   } | null>(null);
   async function run(name: string) {
+    if (operationRef.current) return;
+    operationRef.current = true;
     setBusy(name);
+    setPanel(true);
+    setPanelTab("output");
+    log(`[${name}] iniciado`);
+    let poll: ReturnType<typeof setInterval> | undefined;
+    let received = 0;
+    const progress = async () => {
+      const data = await api("build-status");
+      for (const line of data.logs.slice(received)) log(line);
+      received = data.logs.length;
+    };
     try {
       if (["build", "export"].includes(name)) {
         for (const tab of tabsRef.current) if (tab.dirty) await save(tab.file);
         if (tabsRef.current.some((t) => t.dirty))
           throw new Error("Salve ou resolva conflitos antes de continuar.");
       }
+      if (name === "build" || name === "export")
+        poll = setInterval(() => void progress().catch(() => {}), 200);
       const data = await api(name);
+      if (poll) await progress();
       log(
         name === "check"
           ? `Check: ${data.ok ? "sem erros" : `${data.diagnostics.length} diagnostics`}`
@@ -426,6 +492,12 @@ function App() {
       log(message);
       setPanelTab("output");
     } finally {
+      if (poll) {
+        clearInterval(poll);
+        await progress().catch(() => {});
+      }
+      await refresh();
+      operationRef.current = false;
       setBusy("");
     }
   }
@@ -538,7 +610,12 @@ function App() {
       quickSuggestions: { other: true, comments: false, strings: false },
     });
     const cursor = editor.current.onDidChangeCursorPosition((e) =>
-      setPosition(e.position),
+      setPosition((previous) =>
+        previous.lineNumber === e.position.lineNumber &&
+        previous.column === e.position.column
+          ? previous
+          : e.position,
+      ),
     );
     const opener = monaco.editor.registerEditorOpener({
       openCodeEditor: async (_editor, resource, selection) => {
@@ -614,36 +691,49 @@ function App() {
       ).catch((e) => notify(String(e)));
     }
   }, [snapshot?.workspace]);
+  const searchGeneration = useRef(0);
+  const [searching, setSearching] = useState(false);
+  function clearSearch() {
+    searchGeneration.current++;
+    setSearch("");
+    setResults([]);
+    setContext("");
+    setSearching(false);
+  }
   async function doSearch() {
+    const generation = ++searchGeneration.current;
     if (!search.trim()) {
       setResults([]);
       setContext("");
       return;
     }
-    setBusy("search");
+    setSearching(true);
     try {
       if (searchKind === "text") {
         const data = await api("search", { query: search });
+        if (generation !== searchGeneration.current) return;
         setResults(data.matches);
         setContext(
           data.truncated ? "Busca limitada a 200 resultados / 32 MiB." : "",
         );
       } else {
         const data = await api("query", { query: search, depth: 1 });
+        if (generation !== searchGeneration.current) return;
         setResults(data.result.symbols);
         setContext(data.context);
       }
     } catch (e) {
+      if (generation !== searchGeneration.current) return;
       notify(String(e));
       setResults([]);
     } finally {
-      setBusy("");
+      if (generation === searchGeneration.current) setSearching(false);
     }
   }
   async function removePath(file: string) {
-    if (!confirm(`Excluir ${file}? Pastas precisam estar vazias.`)) return;
+    if (!confirm(`Excluir ${file} e todo o seu conteúdo?`)) return;
     try {
-      await api("delete", { file });
+      await api("delete", { file, recursive: true });
       const tab = tabsRef.current.find((t) => t.file === file);
       if (tab) await close(file);
       await refresh();
@@ -803,10 +893,10 @@ function App() {
           <span className="version">0.1</span>
         </div>
         <button
+          title="Trocar projeto"
           className="workspace-command"
           onClick={() => {
-            setPalette({ mode: "commands", query: "" });
-            setPaletteIndex(0);
+            window.dispatchEvent(new Event("luvyn-projects-request"));
           }}
         >
           <Search size={14} />
@@ -814,9 +904,25 @@ function App() {
             {snapshot?.workspace.split(/[\\/]/).at(-1) ||
               "Conectando workspace…"}
           </span>
-          <kbd>Ctrl Shift P</kbd>
+          <ChevronDown size={14} />
         </button>
         <div className="title-actions">
+          {currentIsCloud && (
+            <button
+              title="Sincronizar Cloud"
+              onClick={() => {
+                if (tabsRef.current.some((tab) => tab.dirty)) {
+                  notify("Salve alterações antes de sincronizar.");
+                  return;
+                }
+                void onSync()
+                  .then(() => notify("Cloud sincronizado"))
+                  .catch((error) => notify(String(error)));
+              }}
+            >
+              <RefreshCw size={16} />
+            </button>
+          )}
           <button
             title="Alternar tema"
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -840,6 +946,7 @@ function App() {
             { id: "files", icon: Files, title: "Explorer" },
             { id: "search", icon: Search, title: "Busca" },
             { id: "graph", icon: Network, title: "Grafo" },
+            { id: "language", icon: BookOpen, title: "Linguagem Luvyn" },
           ].map((a) => (
             <button
               key={a.id}
@@ -851,6 +958,7 @@ function App() {
                   setMode("graph");
                   setGraphFocus("");
                 }
+                if (a.id === "language") setMode("language");
               }}
             >
               <a.icon size={21} />
@@ -872,9 +980,11 @@ function App() {
                 ? "Explorer"
                 : section === "search"
                   ? "Busca"
-                  : section === "settings"
-                    ? "Preferências"
-                    : "Grafo semântico"}
+                  : section === "language"
+                    ? "Language"
+                    : section === "settings"
+                      ? "Preferências"
+                      : "Grafo semântico"}
             </span>
             <div>
               {section === "files" && (
@@ -959,6 +1069,9 @@ function App() {
               >
                 <input
                   aria-label="Busca no workspace"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") clearSearch();
+                  }}
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder={
@@ -967,7 +1080,19 @@ function App() {
                       : "quem depende de UserRepository"
                   }
                 />
-                <button type="submit">
+                <button
+                  type="button"
+                  aria-label="Limpar busca"
+                  onClick={clearSearch}
+                  disabled={!search && !searching}
+                >
+                  <X size={15} />
+                </button>
+                <button
+                  type="submit"
+                  aria-label="Executar busca"
+                  disabled={searching}
+                >
                   <Search size={15} />
                 </button>
               </form>
@@ -1055,6 +1180,17 @@ function App() {
               </div>
             </div>
           )}
+          {section === "language" && (
+            <LanguageSidebar
+              entries={dictionary.entries}
+              error={dictionary.error}
+              selected={languageKeyword}
+              select={(k) => {
+                setLanguageKeyword(k);
+                setMode("language");
+              }}
+            />
+          )}
           {section === "settings" && (
             <div className="settings-pane">
               <label>
@@ -1079,6 +1215,15 @@ function App() {
                 Configuração do projeto: luvyn.toml. Atalhos e navegação pelo
                 Command Palette.
               </p>
+              <button
+                onClick={() => {
+                  void api("ignore-config")
+                    .then(() => open(".ignore.luvyn"))
+                    .catch((e) => notify(String(e)));
+                }}
+              >
+                Editar .ignore.luvyn
+              </button>
               <p>
                 Ctrl+S salvar
                 <br />
@@ -1132,6 +1277,20 @@ function App() {
                   </button>
                 </div>
               ))}
+              {mode === "language" && (
+                <div className="tab active">
+                  <button>
+                    <BookOpen size={14} />
+                    Language
+                  </button>
+                  <button
+                    title="Fechar linguagem"
+                    onClick={() => setMode("editor")}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              )}
               {mode === "graph" && (
                 <div className="tab active">
                   <button>
@@ -1166,7 +1325,12 @@ function App() {
           </div>
           <div className="editor-breadcrumb">
             <div>
-              {mode === "graph" ? (
+              {mode === "language" ? (
+                <>
+                  <BookOpen size={13} />
+                  Language / {languageKeyword}
+                </>
+              ) : mode === "graph" ? (
                 <>
                   <Network size={13} />
                   Grafo do workspace
@@ -1222,7 +1386,7 @@ function App() {
           )}
           <div className="workspace-center">
             <div
-              className={`editor-host ${mode === "graph" ? "hidden" : ""}`}
+              className={`editor-host ${mode !== "editor" ? "hidden" : ""}`}
               ref={editorHost}
             />
             {mode === "editor" && !active && (
@@ -1250,7 +1414,7 @@ function App() {
                 </button>
                 <div className="welcome-example">
                   <code>
-                    service UserService
+                    class UserService
                     <br />
                     <span>purpose:</span>
                     <br />
@@ -1263,6 +1427,14 @@ function App() {
                 </div>
                 <small>.lyn editável · .lu compilado · contexto preciso</small>
               </div>
+            )}
+            {mode === "language" && (
+              <LanguageDetails
+                entry={dictionary.entries.find(
+                  (e) => e.keyword === languageKeyword,
+                )}
+                select={setLanguageKeyword}
+              />
             )}
             {mode === "graph" && (
               <Graph
@@ -1387,7 +1559,12 @@ function App() {
         <div>
           <span className="status-brand">L</span>
           <GitBranch size={13} />
-          <span>workspace</span>
+          <span
+            title={`Documentation: ${snapshot?.documentation_root}\nTarget: ${snapshot?.target_project_root}`}
+          >
+            Docs: {snapshot?.workspace.split(/[\\/]/).at(-1)} · Target:{" "}
+            {snapshot?.target_project_root.split(/[\\/]/).at(-1)}
+          </span>
           <button
             onClick={() => {
               setPanel(true);
@@ -1496,6 +1673,8 @@ function App() {
         <FileModal
           modal={modal}
           selected={selectedPath}
+          roots={snapshot?.source_roots || ["."]}
+          entries={dictionary.entries}
           close={() => setModal(null)}
           submit={async (file, text) => {
             try {
@@ -1507,11 +1686,19 @@ function App() {
                     tab.file.startsWith(`${modal.file}/`)
                   )
                     await close(tab.file);
-              } else
-                await api(modal.type === "folder" ? "mkdir" : "create", {
-                  file,
-                  text,
-                });
+              } else {
+                const created = await api(
+                  modal.type === "folder" ? "mkdir" : "create",
+                  { file, text },
+                );
+                if (
+                  modal.type === "file" &&
+                  (typeof created.hash !== "string" || created.file !== file)
+                )
+                  throw new Error(
+                    "Backend did not confirm filesystem creation",
+                  );
+              }
               setModal(null);
               await refresh();
               if (modal.type !== "folder") await open(file);
@@ -1550,17 +1737,32 @@ function App() {
 function FileModal({
   modal,
   selected,
+  roots,
+  entries,
   close,
   submit,
 }: {
   modal: Modal;
   selected: string;
+  roots: string[];
+  entries: LanguageEntry[];
   close: () => void;
   submit: (file: string, text: string) => Promise<void>;
 }) {
-  const parent = selected.endsWith(".lyn")
+  const selectedParent = selected.endsWith(".lyn")
     ? selected.split("/").slice(0, -1).join("/")
     : selected;
+  const parent =
+    selectedParent &&
+    roots.some(
+      (root) =>
+        root === "." ||
+        selectedParent === root ||
+        selectedParent.startsWith(`${root}/`),
+    )
+      ? selectedParent
+      : roots.find((root) => root !== ".") || "";
+  const [submitting, setSubmitting] = useState(false);
   const [path, setPath] = useState(
       modal.type === "move"
         ? modal.file || ""
@@ -1569,12 +1771,9 @@ function FileModal({
     [template, setTemplate] = useState("blank");
   const templates = [
     "blank",
-    "service",
-    "class",
-    "interface",
-    "module",
-    "entity",
-    "system",
+    ...entries
+      .filter((e) => e.category === "Declarations")
+      .map((e) => e.keyword),
   ];
   const name =
     path
@@ -1588,14 +1787,25 @@ function FileModal({
         className="file-dialog"
         role="dialog"
         aria-label="Criar ou mover arquivo"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          void submit(
-            path,
+          if (submitting) return;
+          setSubmitting(true);
+          const snippet =
+            entries.find((entry) => entry.keyword === template)?.completion ||
+            "";
+          const text =
             template === "blank"
               ? ""
-              : `${template} ${name}\n\npurpose:\n    Descreva a intenção\n\n${template === "service" ? "depends:\n\nexposes:\n    execute() -> Void\n" : ""}`,
-          );
+              : snippet.replace(
+                  /\$\{(\d+)(?::([^}]*))?\}/g,
+                  (_all, index, value) => (index === "1" ? name : value || ""),
+                ) + "\n";
+          try {
+            await submit(path, text);
+          } finally {
+            setSubmitting(false);
+          }
         }}
       >
         <h2>
@@ -1613,7 +1823,7 @@ function FileModal({
             value={path}
             onChange={(e) => setPath(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Escape") close();
+              if (e.key === "Escape" && !submitting) close();
             }}
           />
         </label>
@@ -1633,10 +1843,10 @@ function FileModal({
           </label>
         )}
         <div className="dialog-actions">
-          <button type="button" onClick={close}>
+          <button type="button" disabled={submitting} onClick={close}>
             Cancelar
           </button>
-          <button type="submit" className="primary">
+          <button type="submit" className="primary" disabled={submitting}>
             {modal.type === "move" ? "Mover" : "Criar"}
           </button>
         </div>
@@ -1698,4 +1908,10 @@ function ConflictModal({
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <ProjectsGate>
+    {(back, sync, currentIsCloud) => (
+      <App onProjects={back} onSync={sync} currentIsCloud={currentIsCloud} />
+    )}
+  </ProjectsGate>,
+);

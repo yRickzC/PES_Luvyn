@@ -1,0 +1,2 @@
+sources = ["docs"]
+output = ".luvyn/project.lu"

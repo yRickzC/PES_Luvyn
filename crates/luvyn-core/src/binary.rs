@@ -1,4 +1,4 @@
-//! v1: 32-byte header + postcard directory + individually checksummed node records.
+//! v2: 32-byte header + postcard directory + individually checksummed node records.
 use crate::{Error, Result, model::*};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -11,6 +11,9 @@ use std::{
 const MAGIC: &[u8; 8] = b"LUVYN\0\r\n";
 const MAX_FILE: u64 = 256 * 1024 * 1024;
 const HEADER: u64 = 32;
+/// Public format identification for external integrations. Layout is documented in docs/LU_FORMAT.md.
+pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_MAGIC: &[u8; 8] = MAGIC;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
@@ -68,7 +71,7 @@ pub fn encode(graph: &Graph) -> Result<Vec<u8>> {
     let index = postcard::to_allocvec(&directory).map_err(|e| Error::Message(e.to_string()))?;
     let mut out = Vec::with_capacity(32 + index.len() + data.len());
     out.extend(MAGIC);
-    out.extend(1u16.to_le_bytes());
+    out.extend(FORMAT_VERSION.to_le_bytes());
     out.extend(0u16.to_le_bytes());
     out.extend((index.len() as u32).to_le_bytes());
     out.extend((data.len() as u64).to_le_bytes());
@@ -87,6 +90,16 @@ pub fn write(path: &Path, graph: &Graph) -> Result<()> {
     crate::workspace::atomic_write(path, &encode(graph)?)
 }
 impl Artifact {
+    /// Stable adapter API: enumerate metadata without loading node bodies.
+    pub fn nodes(&self) -> &[Record] {
+        &self.directory.records
+    }
+    pub fn edges(&self) -> &[Edge] {
+        &self.directory.edges
+    }
+    pub fn source_hashes(&self) -> &BTreeMap<String, String> {
+        &self.directory.sources
+    }
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path)?;
         let length = file.metadata()?.len();
@@ -101,7 +114,7 @@ impl Artifact {
         let u16at = |i| u16::from_le_bytes([header[i], header[i + 1]]);
         let u32at =
             |i| u32::from_le_bytes([header[i], header[i + 1], header[i + 2], header[i + 3]]);
-        if u16at(8) != 1 || u16at(10) != 0 || u32at(28) != 0 {
+        if u16at(8) != FORMAT_VERSION || u16at(10) != 0 || u32at(28) != 0 {
             return Err(corrupt("unsupported version or flags"));
         }
         let index_length = u32at(12) as u64;
@@ -237,6 +250,8 @@ impl Artifact {
                 namespace: String::new(),
                 parent: None,
                 signature: None,
+                annotations: vec![],
+                generics: vec![],
                 sections: BTreeMap::new(),
                 location: Location::default(),
                 end_line: 0,

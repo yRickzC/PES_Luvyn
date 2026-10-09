@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/luvyn-core", "crates/luvyn"]
+members = ["crates/luvyn-core", "crates/luvyn", "crates/luvyn-mobile", "crates/luvyn-drive"]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,18 @@
+[package]
+name = "luvyn-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+luvyn-core = { path = "../luvyn-core" }
+luvyn-drive = { path = "../luvyn-drive" }
+serde_json.workspace = true
+blake3.workspace = true
+jni = "=0.21.1"
+
+[dev-dependencies]
+tempfile = "3"
